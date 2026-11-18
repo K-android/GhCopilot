@@ -1,0 +1,20 @@
+# Build outputs & IDE files
+**/bin/
+**/obj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.log
+
+# Staging & generated local artifacts (keep dist/ binaries tracked)
+artifacts/
+
+# Local user secrets & logs (never commit API keys or logs)
+*.dpapi
+settings.json
+runs.jsonl
+sent-payloads.jsonl
+index-cache.json
+index-dump.json
+python-component-spike.txt
