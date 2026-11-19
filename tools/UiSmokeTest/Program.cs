@@ -37,17 +37,22 @@ namespace GhCopilot.UiSmokeTest
                     Console.WriteLine("Active platform: " + Eto.Platform.Instance);
                     foreach (AssemblyName reference in plugin.GetReferencedAssemblies())
                         if (reference.Name == "Eto") Console.WriteLine("Plug-in Eto reference: " + reference.FullName);
-                    Type panelType = plugin.GetType("GhCopilot.UI.CopilotPanel", true)!;
+                    Type panelType = plugin.GetType("GhCopilot.Rhino.UI.CopilotDockPanel", true)!;
                     Console.WriteLine("Panel base Eto: " + panelType.BaseType!.Assembly.FullName + " @ " + panelType.BaseType.Assembly.Location);
-                    Console.WriteLine("Constructing shared panel with installed Eto WPF...");
+                    Console.WriteLine("Constructing CopilotDockPanel with installed Eto WPF...");
                     var panel = (Panel)Activator.CreateInstance(panelType, true)!;
                     using (var form = new Form { Content = panel, ClientSize = new Eto.Drawing.Size(430, 700) })
                     {
-                        // Force native WPF construction and layout, not just managed constructors.
+                        // Force native WPF construction and layout across dock sizes, including narrow/unbounded measure.
                         var native = (System.Windows.Window)form.ControlObject;
                         native.Measure(new System.Windows.Size(430, 700));
                         native.Arrange(new System.Windows.Rect(0, 0, 430, 700));
                         native.UpdateLayout();
+
+                        var wpfContent = (System.Windows.UIElement)panel.ControlObject;
+                        wpfContent.Measure(new System.Windows.Size(280, double.PositiveInfinity));
+                        wpfContent.Arrange(new System.Windows.Rect(0, 0, 280, 320));
+                        wpfContent.UpdateLayout();
                     }
                     Console.WriteLine("PASS: panel construction, native WPF layout, and disposal.");
                 }

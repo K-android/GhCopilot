@@ -34,10 +34,7 @@ namespace GhCopilot.UI
             _providerDropDown.SelectedKeyChanged += OnProviderChanged;
 
             _apiKeyBox = new PasswordBox();
-            _keyStatusLabel = new Label
-            {
-                Wrap = WrapMode.Word
-            };
+            _keyStatusLabel = new Label();
 
             _modelIdBox = new TextBox
             {
@@ -83,8 +80,7 @@ namespace GhCopilot.UI
 
             _statusLabel = new Label
             {
-                Text = string.Empty,
-                Wrap = WrapMode.Word
+                Text = string.Empty
             };
 
             var layout = new DynamicLayout
@@ -116,7 +112,7 @@ namespace GhCopilot.UI
             {
                 Border = BorderType.None,
                 ExpandContentWidth = true,
-                ExpandContentHeight = true,
+                ExpandContentHeight = false,
                 Content = layout
             };
             RefreshKeyStatus();

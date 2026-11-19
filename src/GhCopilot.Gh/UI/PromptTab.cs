@@ -66,8 +66,7 @@ namespace GhCopilot.UI
             _useRhinoSelection = new CheckBox { Text = "Use Rhino Selection", Checked = false };
             _tokenEstimateLabel = new Label
             {
-                Text = "Approx. input tokens: — (not billing usage)",
-                Wrap = WrapMode.Word
+                Text = "Approx. input tokens: — (not billing usage)"
             };
 
             _progressBar = new ProgressBar
@@ -78,21 +77,20 @@ namespace GhCopilot.UI
 
             _statusLabel = new Label
             {
-                Text = "Ready.",
-                Wrap = WrapMode.Word
+                Text = "Ready."
             };
             _transcriptBox = new TextArea
             {
                 ReadOnly = true,
                 Wrap = true,
-                Height = 160
+                Height = 140
             };
 
             _warningsBox = new TextArea
             {
                 ReadOnly = true,
                 Wrap = true,
-                Height = 64
+                Height = 56
             };
 
             var layout = new DynamicLayout
@@ -115,13 +113,7 @@ namespace GhCopilot.UI
             layout.Add(new Label { Text = "Validator Warnings / Runtime Messages:" });
             layout.Add(_warningsBox);
             layout.EndVertical();
-            Content = new Scrollable
-            {
-                Border = BorderType.None,
-                ExpandContentWidth = true,
-                ExpandContentHeight = true,
-                Content = layout
-            };
+            Content = layout;
 
             SyncTranscriptFromSession();
             CopilotHostRegistry.GrasshopperBridgeRegistered += OnBridgeRegistered;

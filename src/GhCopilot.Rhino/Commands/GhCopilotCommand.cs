@@ -25,6 +25,7 @@ namespace GhCopilot.Rhino.Commands
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
             StartupDiagnostics.Write("GhCopilot command: opening dock panel.");
+            StartupDiagnostics.WriteEnvironment(typeof(GhCopilotCommand).Assembly);
             try
             {
                 Panels.OpenPanel(typeof(CopilotDockPanel).GUID);

@@ -97,21 +97,18 @@ namespace GhCopilot.Installer
                 if (File.Exists(settingsFile))
                 {
                     string xml = File.ReadAllText(settingsFile, Encoding.UTF8);
-                    if (xml.IndexOf("LoadNetFramework", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (xml.IndexOf("<entry key=\"LoadNetFramework\">True</entry>", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        if (xml.IndexOf("<entry key=\"LoadNetFramework\">False</entry>", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            return "net7.0";
-                        }
+                        return "net48";
                     }
                 }
             }
             catch
             {
-                // Ignore settings read errors and fall back to net48 default.
+                // Ignore settings read errors and fall back to Rhino 8's default .NET 7 runtime.
             }
 
-            return "net48";
+            return "net7.0";
         }
 
         internal static string InstallCore(
@@ -325,8 +322,8 @@ namespace GhCopilot.Installer
             _runtimeCombo.Items.AddRange(new object[]
             {
                 "Auto-detect (Recommended)",
-                "net48 (.NET Framework - Rhino 8 default fallback)",
-                "net7.0 (.NET Core)"
+                "net7.0 (.NET Core - Rhino 8 Windows default)",
+                "net48 (.NET Framework)"
             });
             _runtimeCombo.SelectedIndex = 0;
 
@@ -456,8 +453,8 @@ namespace GhCopilot.Installer
             {
                 string? runtimeChoice = _runtimeCombo.SelectedIndex switch
                 {
-                    1 => "net48",
-                    2 => "net7.0",
+                    1 => "net7.0",
+                    2 => "net48",
                     _ => null
                 };
 

@@ -21,8 +21,7 @@ namespace GhCopilot.UI
         {
             _previewStatusLabel = new Label
             {
-                Text = "No active preview on canvas.",
-                Wrap = WrapMode.Word
+                Text = "No active preview on canvas."
             };
 
             _acceptButton = new Button

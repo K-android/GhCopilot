@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace GhCopilot.Core.Host
@@ -33,7 +34,7 @@ namespace GhCopilot.Core.Host
         public static void WriteEnvironment(Assembly pluginAssembly)
         {
             Write("Plug-in assembly: " + pluginAssembly.FullName + " @ " + pluginAssembly.Location);
-            Write("CLR: " + Environment.Version + "; 64-bit: " + Environment.Is64BitProcess);
+            Write("CLR: " + RuntimeInformation.FrameworkDescription + " (" + Environment.Version + "); 64-bit: " + Environment.Is64BitProcess);
             foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 string? name = assembly.GetName().Name;
