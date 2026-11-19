@@ -264,6 +264,58 @@ namespace GhCopilot.Tests
         }
 
         [Fact]
+        public void Build_IncludesMatchingRecipesBeforeNewUserMessage()
+        {
+            var recipes = new[]
+            {
+                new RecipeRecord
+                {
+                    Name = "CircleRecipe",
+                    Description = "Circle from radius slider",
+                    Spec = new GraphSpec { Explanation = "Builds circle" }
+                }
+            };
+
+            string payload = ChatPromptBuilder.Build(new ChatSession(), null, null, "make a circle", Shortlist(), recipes);
+            int recipesPos = payload.IndexOf("MATCHING SAVED RECIPES", StringComparison.Ordinal);
+            int userPos = payload.IndexOf("NEW USER MESSAGE:", StringComparison.Ordinal);
+            Assert.True(recipesPos > 0);
+            Assert.True(userPos > recipesPos);
+            Assert.Contains("CircleRecipe", payload);
+            Assert.EndsWith("NEW USER MESSAGE:" + Environment.NewLine + "make a circle", payload);
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void BuildValidationRepairPrompt_IncludesErrorsAndRedactsGuids(bool patchOnly)
+        {
+            Guid secretId = Guid.NewGuid();
+            string repaired = ChatPromptBuilder.BuildValidationRepairPrompt(
+                "BASE PAYLOAD",
+                $"{{\"id\":\"{secretId}\"}}",
+                new[] { "Invalid port 'Foo'" },
+                patchOnly);
+
+            Assert.StartsWith("BASE PAYLOAD", repaired);
+            Assert.Contains("FAILED VALIDATION", repaired);
+            Assert.Contains("Invalid port 'Foo'", repaired);
+            Assert.DoesNotContain(secretId.ToString(), repaired);
+            Assert.Contains("[guid omitted]", repaired);
+            Assert.Equal(patchOnly, repaired.Contains("OMIT unused properties"));
+        }
+
+        [Fact]
+        public void System_ExplainsNoOpJsonResponsesForConversationalQuestions()
+        {
+            string patchSystem = ChatPromptBuilder.BuildSystem(Shortlist(), patchOnly: true);
+            string createSystem = ChatPromptBuilder.BuildSystem(Shortlist(), patchOnly: false);
+            Assert.Contains("OMIT unused properties", patchSystem);
+            Assert.Contains("\"ops\":[]", patchSystem);
+            Assert.Contains("\"nodes\":[],\"wires\":[]", createSystem);
+        }
+
+        [Fact]
         public void Builders_RejectInvalidRequiredArguments()
         {
             var session = new ChatSession();

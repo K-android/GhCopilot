@@ -51,7 +51,7 @@ namespace GhCopilot.Gh.Host
             {
                 if (HasActivePreview) return FailureResponse("Accept or reject the pending turn before sending another message.");
                 if (string.IsNullOrWhiteSpace(prompt) && action == ChatAction.Message)
-                    return FinishChat(user, FailureResponse("Enter a message first. Supply missing inputs, or explicitly enable Use Rhino Selection."));
+                    return FailureResponse("Enter a message first. Supply missing inputs, or explicitly enable Use Rhino Selection.");
 
                 IndexStore store = EnsureIndexLoaded();
                 CanvasSnapshot snapshot = await UiThread.MutateActiveDocumentAsync(doc =>
@@ -60,23 +60,25 @@ namespace GhCopilot.Gh.Host
                     if (_chatDocument != null && !ReferenceEquals(_chatDocument, doc))
                         throw new InvalidOperationException("The active definition changed. Start a New Chat before continuing.");
                     _chatDocument = doc;
+                    Session.SpawnedNodeIds.RemoveWhere(id => doc.FindObject(id, false) == null);
+                    Session.LastSpawnedNodeIds.RemoveAll(id => doc.FindObject(id, false) == null);
                     return CaptureChatSnapshot(doc, store);
                 }).ConfigureAwait(false);
 
                 if (action == ChatAction.SaveRecipe)
                 {
-                    if (snapshot.Nodes.Count == 0) return FinishChat(user, FailureResponse("Select a subgraph to save, or create one in this chat first."));
+                    if (snapshot.Nodes.Count == 0) return FailureResponse("Select a subgraph to save, or create one in this chat first.");
                     string name = string.IsNullOrWhiteSpace(prompt) ? "Chat recipe" : prompt.Substring(0, Math.Min(48, prompt.Length));
                     RecipeRecord recipe = RecipeStore.CreateFromCanvasSnapshot(name, prompt, snapshot);
-                    if (recipe.Spec.Nodes.Count == 0) return FinishChat(user, FailureResponse("The selected nodes are not indexed and cannot be saved as a recipe."));
+                    if (recipe.Spec.Nodes.Count == 0) return FailureResponse("The selected nodes are not indexed and cannot be saved as a recipe.");
                     RecipeStore.SaveRecipe(recipe);
-                    return FinishChat(user, new CopilotGenerationResponse { IsSuccess = true, StatusLine = $"Saved recipe '{name}'." });
+                    return new CopilotGenerationResponse { IsSuccess = true, StatusLine = $"Saved recipe '{name}'.", Explanation = $"Saved recipe '{name}' ({recipe.Spec.Nodes.Count} node(s), {recipe.Spec.Wires.Count} wire(s))." };
                 }
 
                 if ((action == ChatAction.ExplainSelection || action == ChatAction.FixSelection) && snapshot.Nodes.Count == 0)
-                    return FinishChat(user, FailureResponse("Select Grasshopper components first. Rhino selection is only used as input when explicitly enabled."));
+                    return FailureResponse("Select Grasshopper components first. Rhino selection is only used as input when explicitly enabled.");
                 if (!TryLoadConfig(out AppSettings settings, out string apiKey, out string? configError))
-                    return FinishChat(user, FailureResponse(configError!));
+                    return FailureResponse(configError!);
 
                 IReadOnlyList<ComponentRecord> shortlist = BuildShortlistForFix(store, snapshot, user);
                 await UiThread.MutateActiveDocumentAsync(doc => { EnsureChatDocument(doc); ParamHydrator.HydrateShortlist(shortlist); return true; }).ConfigureAwait(false);
@@ -90,44 +92,54 @@ namespace GhCopilot.Gh.Host
                         return FinishChat(user, InputResponse(inputs));
                 }
 
-                bool patchOnly = snapshot.Nodes.Count > 0 || Session.SpawnedNodeIds.Count > 0;
+                bool patchOnly = snapshot.Nodes.Count > 0;
+                IReadOnlyList<RecipeRecord> matchingRecipes = !patchOnly && action == ChatAction.Message
+                    ? RecipeStore.RetrieveMatchingRecipes(
+                        RecipeStore.LoadAll(sharedLibraryFolder: settings.SharedLibraryFolder),
+                        prompt,
+                        maxRecipes: 2)
+                    : Array.Empty<RecipeRecord>();
+
                 string system = action == ChatAction.ExplainSelection
                     ? PromptBuilder.BuildExplainSystemInstruction()
                     : ChatPromptBuilder.BuildSystem(shortlist, patchOnly);
                 system += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
                 JsonElement schema = patchOnly ? GraphPatchSchema.Build() : SchemaBuilder.BuildResponseJsonSchema(shortlist);
-                string payload = ChatPromptBuilder.Build(Session, snapshot, null, user, shortlist);
-                tokens = EstimateSend(system, payload, action == ChatAction.ExplainSelection ? null : schema.GetRawText());
-                PayloadAuditLogger.LogSentPayload("ChatScopedSnapshot", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, system, payload);
+                string basePayload = ChatPromptBuilder.Build(Session, snapshot, null, user, shortlist, matchingRecipes);
 
                 if (action == ChatAction.ExplainSelection)
                 {
-                    string text = await _geminiClient.GenerateTextAsync(apiKey, settings.ModelId, system, payload,
+                    tokens = EstimateSend(system, basePayload, null);
+                    PayloadAuditLogger.LogSentPayload("ChatScopedSnapshot", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, system, basePayload);
+                    string text = await _geminiClient.GenerateTextAsync(apiKey, settings.ModelId, system, basePayload,
                         TimeSpan.FromSeconds(settings.RequestTimeoutSeconds), cancellationToken, settings.Provider, endpoint).ConfigureAwait(false);
                     return FinishChat(user, new CopilotGenerationResponse { IsSuccess = true, Explanation = text, StatusLine = "Selection explained.", EstimatedInputTokens = tokens });
                 }
 
-                string raw = await _geminiClient.GenerateGraphJsonAsync(apiKey, settings.ModelId, system, payload, schema,
-                    TimeSpan.FromSeconds(settings.RequestTimeoutSeconds), cancellationToken, settings.Provider, endpoint).ConfigureAwait(false);
-                GraphPatch? patch = null;
-                GraphSpec? graph = null;
-                string explanation;
-                if (patchOnly)
+                (bool validOutput, GraphPatch? patch, GraphSpec? graph, string explanation, List<string> validationErrors, int initialTokens) =
+                    await GenerateAndValidateChatTurnAsync(
+                        apiKey, settings, endpoint, system, basePayload, schema, patchOnly, action, useRhinoSelection,
+                        snapshot, shortlist, cancellationToken).ConfigureAwait(false);
+                tokens += initialTokens;
+
+                if (!validOutput)
                 {
-                    patch = JsonSerializer.Deserialize<GraphPatch>(raw) ?? throw new JsonException("Empty patch.");
-                    PatchValidationResult validation = GraphPatchValidator.Validate(patch, snapshot, shortlist);
-                    if (!validation.IsValid) return FinishChat(user, PatchFailure(validation.Errors, tokens));
-                    explanation = patch.Explanation;
+                    return PatchFailure(validationErrors, tokens);
                 }
-                else
+
+                bool hasCanvasEdits = patchOnly
+                    ? (patch!.Ops.Count > 0 || useRhinoSelection)
+                    : (graph!.Nodes.Count > 0 || graph.Script != null || useRhinoSelection);
+
+                if (!hasCanvasEdits)
                 {
-                    graph = JsonSerializer.Deserialize<GraphSpec>(raw) ?? throw new JsonException("Empty graph.");
-                    if (graph.Nodes == null || graph.Wires == null || graph.Nodes.Any(n => n == null) || graph.Wires.Any(w => w == null))
-                        throw new JsonException("Graph nodes and wires must not contain null.");
-                    ValidationResult validation = GraphValidator.Validate(graph, shortlist.ToDictionary(r => r.ShortId));
-                    if (!validation.IsValid) return FinishChat(user, PatchFailure(validation.Errors.Select(e => e.ToString()).ToList(), tokens));
-                    if (settings.AutoLayout && GraphAutoLayout.NeedsAutoLayout(graph)) GraphAutoLayout.ApplyLayeredLayout(graph);
-                    explanation = graph.Explanation;
+                    return FinishChat(user, new CopilotGenerationResponse
+                    {
+                        IsSuccess = true,
+                        Explanation = explanation,
+                        StatusLine = "Answered without canvas changes.",
+                        EstimatedInputTokens = tokens
+                    });
                 }
 
                 _previousChatScope.Clear();
@@ -168,6 +180,7 @@ namespace GhCopilot.Gh.Host
                     }).ConfigureAwait(false);
                     string repairUser = "Fix only the runtime errors from this turn using patch ops; all required inputs have been checked. Original request: " + user;
                     string repairSystem = ChatPromptBuilder.BuildSystem(shortlist, true);
+                    repairSystem += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
                     string repairPayload = ChatPromptBuilder.Build(Session, repairSnapshot, state.RuntimeMessages, repairUser, shortlist);
                     JsonElement repairSchema = GraphPatchSchema.Build();
                     tokens += EstimateSend(repairSystem, repairPayload, repairSchema.GetRawText());
@@ -205,6 +218,7 @@ namespace GhCopilot.Gh.Host
                 foreach (Guid id in transaction!.AddedNodeIds) Session.SpawnedNodeIds.Add(id);
                 lock (_previewLock) _chatPreview = transaction;
                 transaction = null; // ownership passes to Accept/Reject
+                OnPreviewStateChanged();
                 CopilotGenerationResponse result = InputResponse(state);
                 result.IsSuccess = true;
                 result.NodeCount = scope.Count;
@@ -223,12 +237,136 @@ namespace GhCopilot.Gh.Host
                     await RollbackChatAsync(transaction).ConfigureAwait(false);
                 if (ex is OperationCanceledException)
                 {
-                    Session.CompleteTurn(user, "Request cancelled; this turn was rolled back.");
                     throw;
                 }
-                return FinishChat(user, new CopilotGenerationResponse { StatusLine = "Chat failed: " + ex.Message, EstimatedInputTokens = tokens });
+                return new CopilotGenerationResponse { StatusLine = "Chat failed: " + ex.Message, EstimatedInputTokens = tokens };
             }
             finally { _chatGate.Release(); }
+        }
+
+        private async Task<(bool IsValid, GraphPatch? Patch, GraphSpec? Graph, string Explanation, List<string> Errors, int TotalTokens)>
+            GenerateAndValidateChatTurnAsync(
+                string apiKey,
+                AppSettings settings,
+                string? endpoint,
+                string system,
+                string basePayload,
+                JsonElement schema,
+                bool patchOnly,
+                ChatAction action,
+                bool useRhinoSelection,
+                CanvasSnapshot snapshot,
+                IReadOnlyList<ComponentRecord> shortlist,
+                CancellationToken cancellationToken)
+        {
+            string schemaRaw = schema.GetRawText();
+            string currentPayload = basePayload;
+            string lastRaw = string.Empty;
+            var lastErrors = new List<string>();
+            int totalTokens = 0;
+
+            Dictionary<string, ComponentRecord> shortlistMap = BuildSafeShortlistMap(shortlist);
+            Dictionary<string, ComponentRecord> externalNodes = snapshot.BuildExternalSelectionRecordMap();
+
+            for (int attempt = 0; attempt <= RepairLoop.MaxValidatorRetries; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    currentPayload = ChatPromptBuilder.BuildValidationRepairPrompt(basePayload, lastRaw, lastErrors, patchOnly);
+                }
+
+                totalTokens += EstimateSend(system, currentPayload, schemaRaw);
+                PayloadAuditLogger.LogSentPayload(
+                    attempt == 0 ? "ChatScopedSnapshot" : $"ChatValidationRepairAttempt{attempt}",
+                    $"{settings.Provider}:{settings.ModelId}",
+                    settings.SendCanvasData,
+                    system,
+                    currentPayload);
+
+                lastRaw = await _geminiClient.GenerateGraphJsonAsync(
+                    apiKey,
+                    settings.ModelId,
+                    system,
+                    currentPayload,
+                    schema,
+                    TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
+                    cancellationToken,
+                    settings.Provider,
+                    endpoint).ConfigureAwait(false);
+
+                if (patchOnly)
+                {
+                    try
+                    {
+                        GraphPatch patch = JsonSerializer.Deserialize<GraphPatch>(lastRaw) ?? throw new JsonException("Empty patch.");
+                        PatchValidationResult validation = GraphPatchValidator.Validate(patch, snapshot, shortlist);
+                        if (validation.IsValid)
+                        {
+                            return (true, patch, null, patch.Explanation, new List<string>(), totalTokens);
+                        }
+
+                        lastErrors = new List<string>(validation.Errors);
+                    }
+                    catch (JsonException ex)
+                    {
+                        lastErrors = new List<string> { "JSON schema error: " + ex.Message };
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        GraphSpec graph = JsonSerializer.Deserialize<GraphSpec>(lastRaw, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                            ?? throw new JsonException("Empty graph.");
+                        if (graph.Nodes == null || graph.Wires == null || graph.Nodes.Any(n => n == null) || graph.Wires.Any(w => w == null))
+                        {
+                            throw new JsonException("Graph nodes and wires must not contain null.");
+                        }
+
+                        if (action == ChatAction.Message &&
+                            !useRhinoSelection &&
+                            graph.Nodes.Count == 0 &&
+                            graph.Script == null &&
+                            !string.IsNullOrWhiteSpace(graph.Explanation))
+                        {
+                            return (true, null, graph, graph.Explanation, new List<string>(), totalTokens);
+                        }
+
+                        ValidationResult validation = GraphValidator.Validate(graph, shortlistMap, externalNodes);
+                        if (validation.IsValid)
+                        {
+                            if (settings.AutoLayout && graph.Nodes.Count > 1 && GraphAutoLayout.NeedsAutoLayout(graph))
+                            {
+                                GraphAutoLayout.ApplyLayeredLayout(graph);
+                            }
+
+                            return (true, null, graph, graph.Explanation, new List<string>(), totalTokens);
+                        }
+
+                        lastErrors = validation.Errors.Select(e => e.ToString()).ToList();
+                    }
+                    catch (JsonException ex)
+                    {
+                        lastErrors = new List<string> { "JSON parse error: " + ex.Message };
+                    }
+                }
+            }
+
+            return (false, null, null, string.Empty, lastErrors, totalTokens);
+        }
+
+        private static Dictionary<string, ComponentRecord> BuildSafeShortlistMap(IReadOnlyList<ComponentRecord> shortlist)
+        {
+            var map = new Dictionary<string, ComponentRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (ComponentRecord record in shortlist)
+            {
+                if (record != null && !string.IsNullOrWhiteSpace(record.ShortId) && !map.ContainsKey(record.ShortId))
+                {
+                    map[record.ShortId] = record;
+                }
+            }
+
+            return map;
         }
 
         private CanvasSnapshot CaptureChatSnapshot(GH_Document doc, IndexStore store, IReadOnlyList<Guid>? scope = null, bool selectionFirst = true)

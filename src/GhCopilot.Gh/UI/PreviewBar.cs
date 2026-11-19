@@ -14,13 +14,15 @@ namespace GhCopilot.UI
         private readonly Label _previewStatusLabel;
         private readonly Button _acceptButton;
         private readonly Button _rejectButton;
+        private IChatHostBridge? _subscribedChatBridge;
         private bool _isBusy;
 
         public PreviewBar()
         {
             _previewStatusLabel = new Label
             {
-                Text = "No active preview on canvas."
+                Text = "No active preview on canvas.",
+                Wrap = WrapMode.Word
             };
 
             _acceptButton = new Button
@@ -49,7 +51,58 @@ namespace GhCopilot.UI
             layout.EndVertical();
 
             Content = layout;
+            AttachBridgeEvents();
+            CopilotHostRegistry.GrasshopperBridgeRegistered += OnBridgeRegistered;
             RefreshState();
+        }
+
+        private void OnBridgeRegistered(object? sender, EventArgs e)
+        {
+            Application.Instance?.AsyncInvoke(() =>
+            {
+                AttachBridgeEvents();
+                RefreshState();
+            });
+        }
+
+        private void OnBridgePreviewStateChanged(object? sender, EventArgs e)
+        {
+            Application.Instance?.AsyncInvoke(RefreshState);
+        }
+
+        private void AttachBridgeEvents()
+        {
+            IChatHostBridge? chat = CopilotHostRegistry.GrasshopperBridge as IChatHostBridge;
+            if (ReferenceEquals(chat, _subscribedChatBridge))
+            {
+                return;
+            }
+
+            if (_subscribedChatBridge != null)
+            {
+                _subscribedChatBridge.PreviewStateChanged -= OnBridgePreviewStateChanged;
+            }
+
+            _subscribedChatBridge = chat;
+            if (_subscribedChatBridge != null)
+            {
+                _subscribedChatBridge.PreviewStateChanged += OnBridgePreviewStateChanged;
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                CopilotHostRegistry.GrasshopperBridgeRegistered -= OnBridgeRegistered;
+                if (_subscribedChatBridge != null)
+                {
+                    _subscribedChatBridge.PreviewStateChanged -= OnBridgePreviewStateChanged;
+                    _subscribedChatBridge = null;
+                }
+            }
+
+            base.Dispose(disposing);
         }
 
         public event EventHandler<string>? PreviewActionCompleted;

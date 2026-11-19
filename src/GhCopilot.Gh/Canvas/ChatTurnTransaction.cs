@@ -341,7 +341,20 @@ namespace GhCopilot.Gh.Canvas
                     throw new InvalidOperationException("The proxy did not create a new, uniquely identified object.");
                 var edit = new Edit(Document, instance, false, true);
                 _edits.Add(edit);
-                CanvasSpawner.ConfigureObject(instance, node);
+                if (node.Settings != null)
+                {
+                    CanvasSpawner.ConfigureObject(instance, node);
+                }
+                else if (instance is GH_NumberSlider)
+                {
+                    // Keep newly added sliders consistent with GraphPatchValidator defaults (0..100, value=0, 2 decimals).
+                    CanvasSpawner.ConfigureObject(instance, new NodeSpec
+                    {
+                        Id = node.Id,
+                        Ref = node.Ref,
+                        Settings = new NodeSettings { Min = 0, Max = 100, Value = 0, Decimals = 2 }
+                    });
+                }
                 WireConnector.ApplyNodeInputModifiers(instance, node.Settings);
                 if (instance.Attributes == null) instance.CreateAttributes();
                 if (instance.Attributes == null) throw new InvalidOperationException("The new object has no attributes.");

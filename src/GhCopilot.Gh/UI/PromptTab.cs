@@ -38,9 +38,10 @@ namespace GhCopilot.UI
             _promptBox = new TextArea
             {
                 Text = "circle with a radius slider",
-                Height = 80,
+                Height = 64,
                 Wrap = true
             };
+            _promptBox.KeyDown += OnPromptKeyDown;
 
             _sendButton = new Button { Text = "Send" };
             _sendButton.Click += OnSendClicked;
@@ -63,7 +64,11 @@ namespace GhCopilot.UI
             _newChatButton = new Button { Text = "New Chat" };
             _newChatButton.Click += OnNewChatClicked;
             _useRhinoSelection = new CheckBox { Text = "Use Rhino Selection", Checked = false };
-            _tokenEstimateLabel = new Label { Text = "Approx. input tokens: — (not billing usage)" };
+            _tokenEstimateLabel = new Label
+            {
+                Text = "Approx. input tokens: — (not billing usage)",
+                Wrap = WrapMode.Word
+            };
 
             _progressBar = new ProgressBar
             {
@@ -73,20 +78,21 @@ namespace GhCopilot.UI
 
             _statusLabel = new Label
             {
-                Text = "Ready."
+                Text = "Ready.",
+                Wrap = WrapMode.Word
             };
             _transcriptBox = new TextArea
             {
                 ReadOnly = true,
                 Wrap = true,
-                Height = 220
+                Height = 160
             };
 
             _warningsBox = new TextArea
             {
                 ReadOnly = true,
                 Wrap = true,
-                Height = 75
+                Height = 64
             };
 
             var layout = new DynamicLayout
@@ -109,13 +115,16 @@ namespace GhCopilot.UI
             layout.Add(new Label { Text = "Validator Warnings / Runtime Messages:" });
             layout.Add(_warningsBox);
             layout.EndVertical();
-            Content = layout;
-
-            if (CopilotHostRegistry.GrasshopperBridge is IChatHostBridge chat)
+            Content = new Scrollable
             {
-                if (!string.IsNullOrEmpty(chat.Session.Summary)) AppendTranscript("Context", chat.Session.Summary);
-                foreach (var message in chat.Session.Messages) AppendTranscript(message.Role, message.Content);
-            }
+                Border = BorderType.None,
+                ExpandContentWidth = true,
+                ExpandContentHeight = true,
+                Content = layout
+            };
+
+            SyncTranscriptFromSession();
+            CopilotHostRegistry.GrasshopperBridgeRegistered += OnBridgeRegistered;
             _previewBar.PreviewActionCompleted += (_, status) =>
             {
                 _statusLabel.Text = status;
@@ -124,6 +133,44 @@ namespace GhCopilot.UI
             };
             _previewBar.PreviewStateChanged += (_, __) => UpdateActionState();
             UpdateActionState();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                CopilotHostRegistry.GrasshopperBridgeRegistered -= OnBridgeRegistered;
+            }
+
+            base.Dispose(disposing);
+        }
+
+        private void OnBridgeRegistered(object? sender, EventArgs e)
+        {
+            Application.Instance?.AsyncInvoke(() =>
+            {
+                SyncTranscriptFromSession();
+                UpdateActionState();
+                if (_statusLabel.Text == "Ready." ||
+                    _statusLabel.Text == "Open Grasshopper first to initialize the .gha bridge.")
+                {
+                    _statusLabel.Text = "Grasshopper connected. Ready.";
+                }
+            });
+        }
+
+        private void SyncTranscriptFromSession()
+        {
+            if (!string.IsNullOrEmpty(_transcriptBox.Text))
+            {
+                return;
+            }
+
+            if (CopilotHostRegistry.GrasshopperBridge is IChatHostBridge chat)
+            {
+                if (!string.IsNullOrEmpty(chat.Session.Summary)) AppendTranscript("Context", chat.Session.Summary);
+                foreach (var message in chat.Session.Messages) AppendTranscript(message.Role, message.Content);
+            }
         }
 
         private bool CanStartAction()
@@ -236,6 +283,10 @@ namespace GhCopilot.UI
                             _warningsBox.Text = combinedMessages.Count > 0 ? string.Join(Environment.NewLine, combinedMessages) : "None.";
                             if (chat != null) ShowTokenEstimate(response.EstimatedInputTokens);
                             else _tokenEstimateLabel.Text = "Approx. input tokens: unavailable on legacy host (not billing usage)";
+                            if (response.IsSuccess && action == ChatAction.Message)
+                            {
+                                _promptBox.Text = string.Empty;
+                            }
                         }
                         else
                         {
@@ -255,6 +306,18 @@ namespace GhCopilot.UI
             }
         }
 
+        private void OnPromptKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key == Keys.Enter && e.Modifiers == Keys.Control)
+            {
+                e.Handled = true;
+                if (_sendButton.Enabled)
+                {
+                    OnSendClicked(this, EventArgs.Empty);
+                }
+            }
+        }
+
         private async void OnSendClicked(object? sender, EventArgs e)
         {
             string prompt = _promptBox.Text?.Trim() ?? string.Empty;
@@ -265,14 +328,14 @@ namespace GhCopilot.UI
             }
 
             await RunBridgeActionAsync(
-                prompt, ChatAction.Message, "Retrieving components and calling Gemini...");
+                prompt, ChatAction.Message, "Retrieving components and calling LLM...");
         }
 
         private async void OnExplainClicked(object? sender, EventArgs e)
         {
             string hint = _promptBox.Text?.Trim() ?? string.Empty;
             await RunBridgeActionAsync(
-                hint, ChatAction.ExplainSelection, "Serializing selection and asking Gemini to explain...");
+                hint, ChatAction.ExplainSelection, "Serializing selection and asking LLM to explain...");
         }
 
         private async void OnFixClicked(object? sender, EventArgs e)

@@ -63,7 +63,7 @@ namespace GhCopilot.UI
             var form = new Form
             {
                 Title = PluginConstants.ProductName,
-                ClientSize = new Size(430, 560),
+                ClientSize = new Size(460, 680),
                 MinimumSize = new Size(340, 440),
                 Resizable = true,
                 Owner = RhinoEtoApp.MainWindowForOwner,

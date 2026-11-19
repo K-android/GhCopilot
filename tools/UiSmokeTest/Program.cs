@@ -23,7 +23,7 @@ namespace GhCopilot.UiSmokeTest
                     foreach (Assembly loaded in AppDomain.CurrentDomain.GetAssemblies())
                         if (loaded.GetName().Name == simpleName) return loaded;
                     string name = simpleName + ".dll";
-                    foreach (string dir in new[] { pluginDir, @"C:\Program Files\Rhino 8\System" })
+                    foreach (string dir in new[] { pluginDir, AppContext.BaseDirectory, @"C:\Program Files\Rhino 8\System" })
                     {
                         string path = Path.Combine(dir, name);
                         if (File.Exists(path)) return Assembly.LoadFrom(path);

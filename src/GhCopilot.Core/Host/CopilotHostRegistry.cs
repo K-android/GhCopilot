@@ -13,6 +13,11 @@ namespace GhCopilot.Core.Host
         private static IGrasshopperHostBridge? _grasshopperBridge;
 
         /// <summary>
+        /// Raised after the Grasshopper host bridge registers during PriorityLoad.
+        /// </summary>
+        public static event EventHandler? GrasshopperBridgeRegistered;
+
+        /// <summary>
         /// Gets the registered Grasshopper host bridge, or null if Grasshopper has not loaded yet.
         /// </summary>
         public static IGrasshopperHostBridge? GrasshopperBridge
@@ -40,6 +45,8 @@ namespace GhCopilot.Core.Host
             {
                 _grasshopperBridge = bridge;
             }
+
+            GrasshopperBridgeRegistered?.Invoke(null, EventArgs.Empty);
         }
 
         internal static void ResetForTests()

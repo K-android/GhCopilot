@@ -28,6 +28,7 @@ namespace GhCopilot.Gh.Host
         private readonly GeminiClient _geminiClient = new GeminiClient();
         private GroupPreview? _activePreview;
         private IndexStore? _indexStore;
+        public event EventHandler? PreviewStateChanged;
 
         public bool IsCanvasCreated => Instances.ActiveCanvas != null;
 
@@ -273,6 +274,7 @@ namespace GhCopilot.Gh.Host
                         result = warnings.Count == 0
                             ? $"Spawned Phase 1 demo ({demo.Nodes.Count} nodes, {demo.Wires.Count} wires) inside preview group."
                             : $"Spawned Phase 1 demo with {warnings.Count} warning(s): {string.Join("; ", warnings)}";
+                        OnPreviewStateChanged();
                     }
                     catch (Exception ex)
                     {
@@ -304,6 +306,7 @@ namespace GhCopilot.Gh.Host
                         _chatPreview = null;
                         Session.RecordPreviewDecision(true);
                         accepted = true;
+                        OnPreviewStateChanged();
                         return;
                     }
                     if (_activePreview != null && _activePreview.IsActive)
@@ -312,6 +315,7 @@ namespace GhCopilot.Gh.Host
                         if (accepted)
                         {
                             _activePreview = null;
+                            OnPreviewStateChanged();
                         }
                     }
                 }
@@ -343,6 +347,7 @@ namespace GhCopilot.Gh.Host
                         Session.SpawnedNodeIds.RemoveWhere(id => doc.FindObject(id, false) == null);
                         Session.RecordPreviewDecision(false);
                         rejected = true;
+                        OnPreviewStateChanged();
                         return;
                     }
                     if (_activePreview != null && _activePreview.IsActive)
@@ -351,12 +356,18 @@ namespace GhCopilot.Gh.Host
                         if (rejected)
                         {
                             _activePreview = null;
+                            OnPreviewStateChanged();
                         }
                     }
                 }
             });
 
             return rejected;
+        }
+
+        private void OnPreviewStateChanged()
+        {
+            PreviewStateChanged?.Invoke(this, EventArgs.Empty);
         }
 
         private static IReadOnlyList<ComponentRecord> BuildShortlistForFix(

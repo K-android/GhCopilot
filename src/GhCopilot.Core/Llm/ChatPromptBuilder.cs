@@ -25,7 +25,8 @@ namespace GhCopilot.Core.Llm
             CanvasSnapshot? snapshot,
             IReadOnlyList<string>? messages,
             string newUser,
-            IReadOnlyList<ComponentRecord> shortlist)
+            IReadOnlyList<ComponentRecord> shortlist,
+            IReadOnlyList<RecipeRecord>? matchingRecipes = null)
         {
             if (session is null) throw new ArgumentNullException(nameof(session));
             if (shortlist is null) throw new ArgumentNullException(nameof(shortlist));
@@ -96,6 +97,15 @@ namespace GhCopilot.Core.Llm
             foreach (CanvasNodeSnapshot node in snapshot.Nodes)
                 foreach (CanvasRuntimeMessage message in node.RuntimeMessages)
                     sb.AppendLine(JsonSerializer.Serialize(new { node = nodeIds[node], level = message.Level, message = RedactGuids(message.Message) }));
+            if (matchingRecipes != null && matchingRecipes.Count > 0)
+            {
+                sb.AppendLine("MATCHING SAVED RECIPES (REUSE/ADAPT WHEN APPROPRIATE):");
+                foreach (RecipeRecord recipe in matchingRecipes)
+                {
+                    sb.AppendLine($"- Recipe '{recipe.Name}': {recipe.Description}");
+                    sb.AppendLine($"  Pattern: {RedactGuids(JsonSerializer.Serialize(recipe.Spec, CompactJson))}");
+                }
+            }
             sb.AppendLine("NEW USER MESSAGE:");
             sb.Append(newUser);
             return sb.ToString();
@@ -110,12 +120,37 @@ namespace GhCopilot.Core.Llm
             sb.AppendLine("Graph instance IDs n1, n2, ... are stable within this chat; node type is its shortlist short ID. Wire endpoints absent from nodes are external context; do not invent their metadata.");
             sb.AppendLine("The following output-mode instructions supersede the GraphSpec-only generation wording above; all component, wiring and script safety rules still apply.");
             sb.AppendLine(patchOnly
-                ? "PATCH ONLY: Return only a GraphPatch JSON matching the supplied schema, never a replacement GraphSpec. Reference existing nodes by stable n IDs; change only what the current request requires."
-                : "Answer conversational questions clearly. When asked to create geometry, return GraphSpec JSON matching the supplied schema; reuse stable graph IDs when referring to existing nodes.");
+                ? "PATCH ONLY: Return only a GraphPatch JSON matching the supplied schema, never a replacement GraphSpec. Reference existing nodes by stable n IDs; change only what the current request requires. In ops[], OMIT unused properties instead of setting them to null (e.g. add_node has only op+node; set_param has only op+nodeId+settings; wire/unwire has only op+wire; delete_node has only op+nodeId; omit unchanged settings keys). To answer a conversational question without modifying the canvas, return {\"ops\":[],\"explanation\":\"...\"}."
+                : "Answer conversational questions clearly. When asked to create geometry, return GraphSpec JSON matching the supplied schema; reuse stable graph IDs when referring to existing nodes. To answer a conversational question without placing geometry, return {\"nodes\":[],\"wires\":[],\"explanation\":\"...\"}.");
             sb.AppendLine("SHORTLIST COMPONENTS:");
             // Retriever has no formatter; share the same record formatter used by PromptBuilder.
             foreach (ComponentRecord record in shortlist) sb.AppendLine(record.FormatPromptContextLine());
             return sb.ToString().TrimEnd();
+        }
+
+        public static string BuildValidationRepairPrompt(
+            string basePayload,
+            string previousRawResponse,
+            IReadOnlyList<string> errors,
+            bool patchOnly)
+        {
+            if (basePayload is null) throw new ArgumentNullException(nameof(basePayload));
+            if (errors is null) throw new ArgumentNullException(nameof(errors));
+
+            var sb = new StringBuilder();
+            sb.AppendLine(basePayload);
+            sb.AppendLine();
+            sb.AppendLine(patchOnly
+                ? "YOUR PREVIOUS GraphPatch JSON FAILED VALIDATION. Fix ONLY the issues below and return valid GraphPatch JSON. Remember to OMIT unused properties in ops[] and settings instead of setting null."
+                : "YOUR PREVIOUS GraphSpec JSON FAILED VALIDATION. Fix ONLY the issues below and return valid GraphSpec JSON.");
+            foreach (string err in errors)
+            {
+                sb.Append("- ");
+                sb.AppendLine(err);
+            }
+            sb.AppendLine("PREVIOUS INVALID OUTPUT:");
+            sb.Append(string.IsNullOrWhiteSpace(previousRawResponse) ? "(empty)" : RedactGuids(previousRawResponse.Trim()));
+            return sb.ToString();
         }
 
         /// <summary>Character-count approximation, not provider usage or a billing estimate.</summary>

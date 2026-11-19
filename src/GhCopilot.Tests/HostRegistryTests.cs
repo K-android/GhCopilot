@@ -86,6 +86,27 @@ namespace GhCopilot.Tests
             Assert.NotEqual(ghId, panelId);
         }
 
+        [Fact]
+        public void RegisterGrasshopperBridge_RaisesGrasshopperBridgeRegisteredEvent()
+        {
+            CopilotHostRegistry.ResetForTests();
+            int raised = 0;
+            EventHandler handler = (_, _) => raised++;
+            CopilotHostRegistry.GrasshopperBridgeRegistered += handler;
+            try
+            {
+                var fake = new FakeGrasshopperBridge(true, 10, "Ready");
+                CopilotHostRegistry.RegisterGrasshopperBridge(fake);
+                Assert.Equal(1, raised);
+                Assert.Same(fake, CopilotHostRegistry.GrasshopperBridge);
+            }
+            finally
+            {
+                CopilotHostRegistry.GrasshopperBridgeRegistered -= handler;
+                CopilotHostRegistry.ResetForTests();
+            }
+        }
+
         private sealed class FakeGrasshopperBridge : IGrasshopperHostBridge
         {
             private readonly string _summary;
