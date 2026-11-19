@@ -20,14 +20,17 @@ namespace GhCopilot.Gh.Canvas
         public static CanvasSnapshot SerializeSelection(
             GH_Document doc,
             IndexStore indexStore,
-            bool includeNonSelectedNeighbors)
+            bool includeNonSelectedNeighbors,
+            IReadOnlyList<Guid>? fallbackNodeIds = null,
+            Func<Guid, string>? stableId = null,
+            bool selectionFirst = true)
         {
             if (doc is null) throw new ArgumentNullException(nameof(doc));
             if (indexStore is null) throw new ArgumentNullException(nameof(indexStore));
 
             var snapshot = new CanvasSnapshot();
 
-            List<IGH_DocumentObject> selected = doc.SelectedObjects()
+            List<IGH_DocumentObject> selected = (selectionFirst ? doc.SelectedObjects() : new List<IGH_DocumentObject>())
                 .Where(o => o != null && !(o is GH_Group))
                 .OrderBy(o => o.Attributes?.Pivot.X ?? 0f)
                 .ThenBy(o => o.Attributes?.Pivot.Y ?? 0f)
@@ -36,7 +39,9 @@ namespace GhCopilot.Gh.Canvas
 
             if (selected.Count == 0)
             {
-                return snapshot;
+                selected = (fallbackNodeIds ?? Array.Empty<Guid>())
+                    .Select(id => doc.FindObject(id, false))
+                    .Where(o => o != null && !(o is GH_Group)).Cast<IGH_DocumentObject>().ToList();
             }
 
             var idByInstanceGuid = new Dictionary<Guid, string>();
@@ -46,7 +51,7 @@ namespace GhCopilot.Gh.Canvas
             for (int i = 0; i < selected.Count; i++)
             {
                 IGH_DocumentObject obj = selected[i];
-                string id = $"s{i + 1}";
+                string id = stableId?.Invoke(obj.InstanceGuid) ?? $"s{i + 1}";
                 idByInstanceGuid[obj.InstanceGuid] = id;
                 selectedInstanceSet.Add(obj.InstanceGuid);
                 includedObjects.Add((obj, id, true));
@@ -134,7 +139,7 @@ namespace GhCopilot.Gh.Canvas
             }
 
             // Capture internal wires among included nodes.
-            var seenWires = new HashSet<string>(StringComparer.Ordinal);
+            var seenWires = new HashSet<(Guid Source, Guid Target)>();
             foreach ((IGH_DocumentObject targetObj, string toId, _) in includedObjects)
             {
                 foreach (IGH_Param input in GetInputParams(targetObj))
@@ -147,9 +152,9 @@ namespace GhCopilot.Gh.Canvas
                             continue;
                         }
 
-                        string fromParam = sourceOwner is IGH_Param ? string.Empty : (sourceParam.Name ?? string.Empty);
-                        string toParam = targetObj is IGH_Param ? string.Empty : (input.Name ?? string.Empty);
-                        string key = $"{fromId}:{fromParam}->{toId}:{toParam}";
+                        string fromParam = Selector(sourceOwner, sourceParam, input: false);
+                        string toParam = Selector(targetObj, input, input: true);
+                        var key = (sourceParam.InstanceGuid, input.InstanceGuid);
                         if (seenWires.Add(key))
                         {
                             string? mapping = input.DataMapping switch
@@ -189,9 +194,9 @@ namespace GhCopilot.Gh.Canvas
                             snapshot.ExternalIncomingWires.Add(new CanvasExternalWire
                             {
                                 ExternalInstanceGuid = sourceOwner.InstanceGuid,
-                                ExternalParamName = sourceOwner is IGH_Param ? string.Empty : (sourceParam.Name ?? string.Empty),
+                                ExternalParamName = Selector(sourceOwner, sourceParam, input: false),
                                 SelectedNodeId = selectedId,
-                                SelectedParamName = selectedObj is IGH_Param ? string.Empty : (input.Name ?? string.Empty)
+                                SelectedParamName = Selector(selectedObj, input, input: true)
                             });
                         }
                     }
@@ -207,9 +212,9 @@ namespace GhCopilot.Gh.Canvas
                             snapshot.ExternalOutgoingWires.Add(new CanvasExternalWire
                             {
                                 SelectedNodeId = selectedId,
-                                SelectedParamName = selectedObj is IGH_Param ? string.Empty : (output.Name ?? string.Empty),
+                                SelectedParamName = Selector(selectedObj, output, input: false),
                                 ExternalInstanceGuid = targetOwner.InstanceGuid,
-                                ExternalParamName = targetOwner is IGH_Param ? string.Empty : (recipient.Name ?? string.Empty)
+                                ExternalParamName = Selector(targetOwner, recipient, input: true)
                             });
                         }
                     }
@@ -218,6 +223,9 @@ namespace GhCopilot.Gh.Canvas
 
             return snapshot;
         }
+
+        public static CanvasSnapshot SerializeObjects(GH_Document doc, IndexStore store, IReadOnlyList<Guid> ids, Func<Guid, string> stableId)
+            => SerializeSelection(doc, store, false, ids, stableId, selectionFirst: false);
 
         private static List<ParamRecord> ExtractParamRecords(IGH_DocumentObject obj, bool isInput)
         {
@@ -290,7 +298,7 @@ namespace GhCopilot.Gh.Canvas
 
             foreach (IGH_Param input in GetInputParams(obj))
             {
-                string paramName = input.Name ?? string.Empty;
+                string paramName = Selector(obj, input, input: true);
                 if (input.DataMapping == GH_DataMapping.Flatten)
                 {
                     settings ??= new NodeSettings();
@@ -345,6 +353,32 @@ namespace GhCopilot.Gh.Canvas
                     });
                 }
             }
+        }
+
+        private static string Selector(IGH_DocumentObject owner, IGH_Param param, bool input)
+        {
+            if (owner is IGH_Param)
+            {
+                return string.Empty;
+            }
+
+            string name = param.Name ?? string.Empty;
+            IEnumerable<IGH_Param> parameters = input ? GetInputParams(owner) : GetOutputParams(owner);
+            int matches = 0;
+            int occurrence = 0;
+            foreach (IGH_Param candidate in parameters)
+            {
+                if (string.Equals(candidate.Name ?? string.Empty, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (ReferenceEquals(candidate, param))
+                    {
+                        occurrence = matches;
+                    }
+                    matches++;
+                }
+            }
+
+            return matches > 1 ? $"{name}[{occurrence}]" : name;
         }
 
         private static IEnumerable<IGH_Param> GetInputParams(IGH_DocumentObject obj)

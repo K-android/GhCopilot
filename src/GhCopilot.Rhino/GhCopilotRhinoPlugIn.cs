@@ -1,5 +1,7 @@
+using System;
 using System.Drawing;
 using GhCopilot.Core;
+using GhCopilot.Core.Host;
 using GhCopilot.Rhino.UI;
 using Rhino.PlugIns;
 using Rhino.UI;
@@ -20,13 +22,25 @@ namespace GhCopilot.Rhino
 
         protected override LoadReturnCode OnLoad(ref string errorMessage)
         {
-            Panels.RegisterPanel(
-                this,
-                typeof(CopilotDockPanel),
-                PluginConstants.ProductName,
-                SystemIcons.Application);
-
-            return LoadReturnCode.Success;
+            StartupDiagnostics.Write("Rhino plug-in OnLoad started.");
+            try
+            {
+                StartupDiagnostics.WriteEnvironment(GetType().Assembly);
+                Panels.RegisterPanel(
+                    this,
+                    typeof(CopilotDockPanel),
+                    PluginConstants.ProductName,
+                    SystemIcons.Application);
+                StartupDiagnostics.Write("Rhino dock panel registration completed.");
+                return LoadReturnCode.Success;
+            }
+            catch (Exception ex)
+            {
+                StartupDiagnostics.Write("Rhino plug-in OnLoad failed.", ex);
+                errorMessage = "GH Copilot could not initialize: " + ex.GetBaseException().Message
+                    + Environment.NewLine + "Details: " + StartupDiagnostics.LogPath;
+                return LoadReturnCode.ErrorShowDialog;
+            }
         }
     }
 }

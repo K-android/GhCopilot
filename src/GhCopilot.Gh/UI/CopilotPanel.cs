@@ -2,6 +2,7 @@ using System;
 using Eto.Drawing;
 using Eto.Forms;
 using GhCopilot.Core;
+using GhCopilot.Core.Host;
 using Rhino.UI;
 
 namespace GhCopilot.UI
@@ -16,9 +17,12 @@ namespace GhCopilot.UI
 
         public CopilotPanel()
         {
+            StartupDiagnostics.Write("Shared UI: constructing preview bar.");
             _previewBar = new PreviewBar();
 
+            StartupDiagnostics.Write("Shared UI: constructing chat tab.");
             var promptTab = new PromptTab(_previewBar);
+            StartupDiagnostics.Write("Shared UI: constructing settings tab.");
             var settingsTab = new SettingsTab();
 
             var tabs = new TabControl();
@@ -35,6 +39,7 @@ namespace GhCopilot.UI
             layout.Add(_previewBar);
 
             Content = layout;
+            StartupDiagnostics.Write("Shared UI: layout attached.");
         }
 
         public void RefreshPreviewBar()

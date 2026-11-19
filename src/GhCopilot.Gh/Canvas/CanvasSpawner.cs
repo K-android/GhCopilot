@@ -399,7 +399,7 @@ namespace GhCopilot.Gh.Canvas
             return rewires;
         }
 
-        private static void ConfigureObject(IGH_DocumentObject instance, NodeSpec node)
+        internal static void ConfigureObject(IGH_DocumentObject instance, NodeSpec node)
         {
             if (node.Settings is null)
             {

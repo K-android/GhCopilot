@@ -21,7 +21,7 @@ namespace GhCopilot.Gh.Host
     /// Exposes live Grasshopper host state, preview actions, index management, recipes,
     /// multi-provider BYOK generation, and canvas awareness.
     /// </summary>
-    public sealed class GrasshopperHostBridge : IGrasshopperHostBridge
+    public sealed partial class GrasshopperHostBridge : IGrasshopperHostBridge, IChatHostBridge
     {
         private readonly object _previewLock = new object();
         private readonly object _indexLock = new object();
@@ -39,7 +39,7 @@ namespace GhCopilot.Gh.Host
             {
                 lock (_previewLock)
                 {
-                    return _activePreview != null && _activePreview.IsActive;
+                    return _chatPreview != null || (_activePreview != null && _activePreview.IsActive);
                 }
             }
         }
@@ -225,218 +225,30 @@ namespace GhCopilot.Gh.Host
 
         public async Task<CopilotGenerationResponse> RunPromptAsync(string prompt, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(prompt))
-            {
-                return FailureResponse("Enter a prompt first.");
-            }
-
-            if (!TryLoadConfig(out AppSettings settings, out string apiKey, out string? configError))
-            {
-                return FailureResponse(configError!);
-            }
-
-            IndexStore store = EnsureIndexLoaded();
-            IReadOnlyList<ComponentRecord> shortlist = Retriever.Retrieve(store.AllComponents, prompt, 60);
-            if (shortlist.Count == 0)
-            {
-                return FailureResponse("Component index is empty; cannot generate graph.");
-            }
-
-            ParamHydrator.HydrateShortlist(shortlist);
-
-            // Check if any objects are currently selected on the canvas so the model can auto-wire from $selected / $s1.
-            CanvasSnapshot? selectedContext = null;
-            if (settings.SendCanvasData)
-            {
-                selectedContext = await UiThread.MutateActiveDocumentAsync(
-                    doc => CanvasSerializer.SerializeSelection(doc, store, includeNonSelectedNeighbors: false)).ConfigureAwait(false);
-                if (selectedContext.SelectedInstanceGuids.Count == 0)
-                {
-                    selectedContext = null;
-                }
-            }
-
-            List<RecipeRecord> allRecipes = RecipeStore.LoadAll(sharedLibraryFolder: settings.SharedLibraryFolder);
-            IReadOnlyList<RecipeRecord> matchingRecipes = RecipeStore.RetrieveMatchingRecipes(allRecipes, prompt, maxRecipes: 2);
-
-            TimeSpan timeout = TimeSpan.FromSeconds(settings.RequestTimeoutSeconds);
-            string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
-
-            RepairLoopResult loopResult = await RepairLoop.GenerateAndValidateAsync(
-                _geminiClient,
-                apiKey,
-                settings.ModelId,
-                prompt,
-                shortlist,
-                timeout: timeout,
-                cancellationToken: cancellationToken,
-                sendCanvasDataEnabled: settings.SendCanvasData,
-                provider: settings.Provider,
-                customEndpointUrl: endpoint,
-                matchingRecipes: matchingRecipes,
-                selectedContext: selectedContext,
-                autoLayout: settings.AutoLayout).ConfigureAwait(false);
-
-            if (!loopResult.IsSuccess || loopResult.Spec is null)
-            {
-                return new CopilotGenerationResponse
-                {
-                    IsSuccess = false,
-                    AttemptsUsed = loopResult.AttemptsUsed,
-                    StatusLine = $"Generation failed after {loopResult.AttemptsUsed} attempt(s): {string.Join("; ", loopResult.Errors)}",
-                    RuntimeMessages = loopResult.Errors.ToList()
-                };
-            }
-
-            return await SpawnWithOptionalRuntimeRepairAsync(
-                loopResult,
-                prompt,
-                shortlist,
-                store,
-                apiKey,
-                settings,
-                replacedOriginalGuids: null,
-                selectionSnapshot: selectedContext,
-                preserveExternalWiresOnFix: false,
-                actionLabel: "Spawned preview",
-                cancellationToken).ConfigureAwait(false);
+            return await SendChatAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
         public async Task<CopilotGenerationResponse> ExplainSelectionAsync(
             string? userHint = null,
             CancellationToken cancellationToken = default)
         {
-            if (!TryLoadConfig(out AppSettings settings, out string apiKey, out string? configError))
-            {
-                return FailureResponse(configError!);
-            }
-
-            IndexStore store = EnsureIndexLoaded();
-            CanvasSnapshot snapshot = await UiThread.MutateActiveDocumentAsync(
-                doc => CanvasSerializer.SerializeSelection(doc, store, settings.SendCanvasData)).ConfigureAwait(false);
-
-            if (snapshot.SelectedInstanceGuids.Count == 0)
-            {
-                return FailureResponse("Select one or more objects on the Grasshopper canvas first.");
-            }
-
-            string systemInstruction = PromptBuilder.BuildExplainSystemInstruction();
-            string promptText = PromptBuilder.BuildExplainSelectionPrompt(snapshot, userHint, settings.SendCanvasData);
-
-            PayloadAuditLogger.LogSentPayload(
-                "ExplainSelection",
-                $"{settings.Provider}:{settings.ModelId}",
-                settings.SendCanvasData,
-                systemInstruction,
-                promptText);
-
-            try
-            {
-                string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
-                string explanation = await _geminiClient.GenerateTextAsync(
-                    apiKey,
-                    settings.ModelId,
-                    systemInstruction,
-                    promptText,
-                    TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
-                    cancellationToken,
-                    settings.Provider,
-                    endpoint).ConfigureAwait(false);
-
-                List<string> selectedRuntimeMessages = snapshot.Nodes
-                    .Where(n => n.IsSelected)
-                    .SelectMany(n => n.RuntimeMessages.Select(m => $"[{m.Level}] {n.Name}: {m.Message}"))
-                    .ToList();
-
-                return new CopilotGenerationResponse
-                {
-                    IsSuccess = true,
-                    NodeCount = snapshot.SelectedInstanceGuids.Count,
-                    StatusLine = $"Explained {snapshot.SelectedInstanceGuids.Count} selected object(s).",
-                    Explanation = explanation,
-                    RuntimeMessages = selectedRuntimeMessages
-                };
-            }
-            catch (GeminiApiException ex)
-            {
-                return FailureResponse($"Explain failed: {ex.Message}");
-            }
+            return await SendChatAsync(userHint ?? string.Empty, ChatAction.ExplainSelection, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
         public async Task<CopilotGenerationResponse> FixSelectionAsync(
             string? userHint = null,
             CancellationToken cancellationToken = default)
         {
-            if (!TryLoadConfig(out AppSettings settings, out string apiKey, out string? configError))
-            {
-                return FailureResponse(configError!);
-            }
-
-            IndexStore store = EnsureIndexLoaded();
-            CanvasSnapshot snapshot = await UiThread.MutateActiveDocumentAsync(
-                doc => CanvasSerializer.SerializeSelection(doc, store, settings.SendCanvasData)).ConfigureAwait(false);
-
-            if (snapshot.SelectedInstanceGuids.Count == 0)
-            {
-                return FailureResponse("Select one or more broken objects on the Grasshopper canvas first.");
-            }
-
-            IReadOnlyList<ComponentRecord> shortlist = BuildShortlistForFix(store, snapshot, userHint);
-            if (shortlist.Count == 0)
-            {
-                return FailureResponse("Component index is empty; cannot fix selection.");
-            }
-
-            ParamHydrator.HydrateShortlist(shortlist);
-
-            TimeSpan timeout = TimeSpan.FromSeconds(settings.RequestTimeoutSeconds);
-            string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
-
-            RepairLoopResult loopResult = await RepairLoop.FixSelectionAndValidateAsync(
-                _geminiClient,
-                apiKey,
-                settings.ModelId,
-                snapshot,
-                userHint,
-                settings.SendCanvasData,
-                shortlist,
-                timeout: timeout,
-                cancellationToken: cancellationToken,
-                provider: settings.Provider,
-                customEndpointUrl: endpoint,
-                autoLayout: settings.AutoLayout).ConfigureAwait(false);
-
-            if (!loopResult.IsSuccess || loopResult.Spec is null)
-            {
-                return new CopilotGenerationResponse
-                {
-                    IsSuccess = false,
-                    AttemptsUsed = loopResult.AttemptsUsed,
-                    StatusLine = $"Fix failed after {loopResult.AttemptsUsed} attempt(s): {string.Join("; ", loopResult.Errors)}",
-                    RuntimeMessages = loopResult.Errors.ToList()
-                };
-            }
-
-            string logicalPrompt = string.IsNullOrWhiteSpace(userHint)
-                ? "Fix selected Grasshopper components"
-                : userHint!.Trim();
-
-            return await SpawnWithOptionalRuntimeRepairAsync(
-                loopResult,
-                logicalPrompt,
-                shortlist,
-                store,
-                apiKey,
-                settings,
-                replacedOriginalGuids: snapshot.SelectedInstanceGuids,
-                selectionSnapshot: snapshot,
-                preserveExternalWiresOnFix: true,
-                actionLabel: "Spawned replacement preview (originals & external wires preserved until Accept)",
-                cancellationToken).ConfigureAwait(false);
+            return await SendChatAsync(userHint ?? string.Empty, ChatAction.FixSelection, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
         public string SpawnDemoGraph()
         {
+            if (HasActivePreview || _chatGate.CurrentCount == 0)
+            {
+                return "Finish the pending turn first.";
+            }
+
             string result = "Scheduled Phase 1 demo spawn on Grasshopper UI thread.";
 
             UiThread.MutateActiveDocument(
@@ -474,12 +286,26 @@ namespace GhCopilot.Gh.Host
 
         public bool AcceptActivePreview()
         {
+            if (_chatGate.CurrentCount == 0)
+            {
+                return false;
+            }
+
             bool accepted = false;
 
             UiThread.MutateActiveDocument(doc =>
             {
                 lock (_previewLock)
                 {
+                    if (_chatPreview != null)
+                    {
+                        if (!ReferenceEquals(doc, _chatPreview.Document)) return;
+                        _chatPreview.Accept();
+                        _chatPreview = null;
+                        Session.RecordPreviewDecision(true);
+                        accepted = true;
+                        return;
+                    }
                     if (_activePreview != null && _activePreview.IsActive)
                     {
                         accepted = _activePreview.Accept(doc);
@@ -496,12 +322,29 @@ namespace GhCopilot.Gh.Host
 
         public bool RejectActivePreview()
         {
+            if (_chatGate.CurrentCount == 0)
+            {
+                return false;
+            }
+
             bool rejected = false;
 
             UiThread.MutateActiveDocument(doc =>
             {
                 lock (_previewLock)
                 {
+                    if (_chatPreview != null)
+                    {
+                        if (!ReferenceEquals(doc, _chatPreview.Document)) return;
+                        _chatPreview.Reject();
+                        _chatPreview = null;
+                        Session.LastSpawnedNodeIds.Clear();
+                        Session.LastSpawnedNodeIds.AddRange(_previousChatScope);
+                        Session.SpawnedNodeIds.RemoveWhere(id => doc.FindObject(id, false) == null);
+                        Session.RecordPreviewDecision(false);
+                        rejected = true;
+                        return;
+                    }
                     if (_activePreview != null && _activePreview.IsActive)
                     {
                         rejected = _activePreview.Reject(doc);
@@ -514,87 +357,6 @@ namespace GhCopilot.Gh.Host
             });
 
             return rejected;
-        }
-
-        private async Task<CopilotGenerationResponse> SpawnWithOptionalRuntimeRepairAsync(
-            RepairLoopResult loopResult,
-            string logicalPrompt,
-            IReadOnlyList<ComponentRecord> shortlist,
-            IndexStore store,
-            string apiKey,
-            AppSettings settings,
-            IReadOnlyList<Guid>? replacedOriginalGuids,
-            CanvasSnapshot? selectionSnapshot,
-            bool preserveExternalWiresOnFix,
-            string actionLabel,
-            CancellationToken cancellationToken)
-        {
-            GraphSpec finalSpec = loopResult.Spec!;
-            List<string> validatorWarnings = loopResult.Validation?.Warnings.Select(w => w.Message).ToList() ?? new List<string>();
-            string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
-
-            (List<string> spawnWarnings, List<string> runtimeMessages) =
-                await SpawnOnCanvasAsync(
-                    finalSpec,
-                    store,
-                    replacedOriginalGuids,
-                    selectionSnapshot,
-                    preserveExternalWiresOnFix).ConfigureAwait(false);
-
-            bool ranRuntimeRepair = false;
-            if (runtimeMessages.Count > 0)
-            {
-                ranRuntimeRepair = true;
-                RepairLoopResult runtimeRepair = await RepairLoop.RepairRuntimeMessagesAsync(
-                    _geminiClient,
-                    apiKey,
-                    settings.ModelId,
-                    logicalPrompt,
-                    shortlist,
-                    finalSpec,
-                    runtimeMessages,
-                    timeout: TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
-                    cancellationToken: cancellationToken,
-                    sendCanvasDataEnabled: settings.SendCanvasData,
-                    provider: settings.Provider,
-                    customEndpointUrl: endpoint,
-                    selectedContext: preserveExternalWiresOnFix ? null : selectionSnapshot,
-                    autoLayout: settings.AutoLayout).ConfigureAwait(false);
-
-                if (runtimeRepair.IsSuccess && runtimeRepair.Spec != null)
-                {
-                    finalSpec = runtimeRepair.Spec;
-                    validatorWarnings = runtimeRepair.Validation?.Warnings.Select(w => w.Message).ToList() ?? new List<string>();
-                    (spawnWarnings, runtimeMessages) =
-                        await SpawnOnCanvasAsync(
-                            finalSpec,
-                            store,
-                            replacedOriginalGuids,
-                            selectionSnapshot,
-                            preserveExternalWiresOnFix).ConfigureAwait(false);
-                }
-            }
-
-            var allRuntimeMessages = new List<string>(spawnWarnings.Count + runtimeMessages.Count);
-            foreach (string sw in spawnWarnings)
-            {
-                allRuntimeMessages.Add($"[Wire] {sw}");
-            }
-            allRuntimeMessages.AddRange(runtimeMessages);
-
-            int spawnedCount = finalSpec.Nodes.Count + (finalSpec.Script != null && !string.IsNullOrWhiteSpace(finalSpec.Script.Code) ? 1 : 0);
-
-            return new CopilotGenerationResponse
-            {
-                IsSuccess = true,
-                NodeCount = spawnedCount,
-                WireCount = finalSpec.Wires.Count,
-                AttemptsUsed = loopResult.AttemptsUsed,
-                Explanation = finalSpec.Explanation ?? string.Empty,
-                ValidatorWarnings = validatorWarnings,
-                RuntimeMessages = allRuntimeMessages,
-                StatusLine = $"{actionLabel} ({spawnedCount} node(s), {finalSpec.Wires.Count} wire(s)) in {loopResult.AttemptsUsed} attempt(s){(ranRuntimeRepair ? " + 1 runtime auto-fix pass" : string.Empty)}."
-            };
         }
 
         private static IReadOnlyList<ComponentRecord> BuildShortlistForFix(
@@ -662,46 +424,6 @@ namespace GhCopilot.Gh.Host
                 IsSuccess = false,
                 StatusLine = statusLine
             };
-        }
-
-        private Task<(List<string> SpawnWarnings, List<string> RuntimeMessages)> SpawnOnCanvasAsync(
-            GraphSpec spec,
-            IndexStore store,
-            IReadOnlyList<Guid>? replacedOriginalGuids = null,
-            CanvasSnapshot? selectionSnapshot = null,
-            bool preserveExternalWiresOnFix = false)
-        {
-            return UiThread.MutateActiveDocumentAsync(doc =>
-            {
-                RejectExistingPreviewIfActive(doc);
-
-                GroupPreview preview = CanvasSpawner.Spawn(
-                    doc,
-                    spec,
-                    shortRef =>
-                    {
-                        ComponentRecord? record = store.GetByShortId(shortRef);
-                        if (record is null || record.ComponentGuid == Guid.Empty)
-                        {
-                            return null;
-                        }
-
-                        return Instances.ComponentServer?.EmitObjectProxy(record.ComponentGuid)
-                               ?? UserObjectFolderLoader.TryGetCompanyProxy(record.ComponentGuid);
-                    },
-                    out List<string> spawnWarnings,
-                    replacedOriginalGuids,
-                    selectionSnapshot,
-                    preserveExternalWiresOnFix);
-
-                lock (_previewLock)
-                {
-                    _activePreview = preview;
-                }
-
-                List<string> runtimeMessages = CanvasSpawner.CollectRuntimeMessages(doc, preview);
-                return (spawnWarnings, runtimeMessages);
-            });
         }
 
         private void RejectExistingPreviewIfActive(GH_Document doc)

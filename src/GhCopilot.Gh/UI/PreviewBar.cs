@@ -14,6 +14,7 @@ namespace GhCopilot.UI
         private readonly Label _previewStatusLabel;
         private readonly Button _acceptButton;
         private readonly Button _rejectButton;
+        private bool _isBusy;
 
         public PreviewBar()
         {
@@ -52,21 +53,30 @@ namespace GhCopilot.UI
         }
 
         public event EventHandler<string>? PreviewActionCompleted;
+        public event EventHandler? PreviewStateChanged;
+
+        public void SetBusy(bool busy)
+        {
+            _isBusy = busy;
+            RefreshState();
+        }
 
         public void RefreshState()
         {
             IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
             bool hasPreview = bridge != null && bridge.HasActivePreview;
 
-            _acceptButton.Enabled = hasPreview;
-            _rejectButton.Enabled = hasPreview;
+            _acceptButton.Enabled = hasPreview && !_isBusy;
+            _rejectButton.Enabled = hasPreview && !_isBusy;
             _previewStatusLabel.Text = hasPreview
                 ? "Preview ready: Accept to keep or Reject to undo cleanly."
                 : "No active preview on canvas.";
+            PreviewStateChanged?.Invoke(this, EventArgs.Empty);
         }
 
         private void OnAcceptClicked(object? sender, EventArgs e)
         {
+            if (_isBusy) return;
             IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
             if (bridge is null || !bridge.AcceptActivePreview())
             {
@@ -81,6 +91,7 @@ namespace GhCopilot.UI
 
         private void OnRejectClicked(object? sender, EventArgs e)
         {
+            if (_isBusy) return;
             IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
             if (bridge is null || !bridge.RejectActivePreview())
             {

@@ -17,6 +17,7 @@ namespace GhCopilot.Core.Host
         public int NodeCount { get; set; }
         public int WireCount { get; set; }
         public int AttemptsUsed { get; set; }
+        public int EstimatedInputTokens { get; set; }
     }
 
     /// <summary>

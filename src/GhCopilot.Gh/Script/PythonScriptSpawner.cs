@@ -63,14 +63,14 @@ namespace GhCopilot.Gh.Script
             }
             else
             {
-                warnings.Add($"Spawned script object '{instance.Name}' does not implement IGH_Component; parameters were not customized.");
+                throw new InvalidOperationException($"Script object '{instance.Name}' does not implement IGH_Component; no graph was applied.");
             }
 
             bool injected = TryInjectCode(instance, script.Code, warnings);
             if (!injected)
             {
-                warnings.Add("Could not verify direct code property/chunk injection; inspect %LOCALAPPDATA%\\GhCopilot\\python-component-spike.txt.");
                 WriteDiagnosticSpikeDump(instance);
+                throw new InvalidOperationException("Could not inject Python code. No script was added; inspect %LOCALAPPDATA%\\GhCopilot\\python-component-spike.txt.");
             }
 
             if (instance.Attributes == null)
@@ -260,7 +260,7 @@ namespace GhCopilot.Gh.Script
 
                 if (!component.Params.RegisterInputParam(newInput))
                 {
-                    warnings.Add($"Failed to register script input '{inputSpec.Name}'.");
+                    throw new InvalidOperationException($"Failed to register required script input '{inputSpec.Name}'.");
                 }
             }
 
@@ -286,7 +286,7 @@ namespace GhCopilot.Gh.Script
 
                 if (!component.Params.RegisterOutputParam(newOutput))
                 {
-                    warnings.Add($"Failed to register script output '{outputSpec.Name}'.");
+                    throw new InvalidOperationException($"Failed to register required script output '{outputSpec.Name}'.");
                 }
             }
 

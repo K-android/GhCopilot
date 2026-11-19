@@ -4,6 +4,14 @@ A standalone hybrid **Rhino 8 + Grasshopper** AI copilot (`.rhp` + `.gha` + `.Co
 
 ---
 
+## Chat and Incremental Editing
+
+The prompt panel now keeps conversational context, snapshots only the selected/last chat subgraph, and uses validated incremental patches for follow-ups. Each turn has Accept/Reject and one accepted undo transaction. Automatic repair is limited to three attempts and runs only for runtime errors with valid required inputs; empty inputs ask for data or explicit **Use Rhino Selection** consent.
+
+See [docs/CHAT.md](docs/CHAT.md) for behavior, privacy, token estimates, and the Rhino smoke-test checklist.
+
+---
+
 ## One-Click Install
 
 1. Download **`dist/GhCopilot-Setup-0.1.0.exe`** (no PowerShell, Yak CLI, or manual `Unblock-File` required).
