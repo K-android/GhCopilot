@@ -10,8 +10,8 @@ using GhCopilot.Core.Settings;
 namespace GhCopilot.UI
 {
     /// <summary>
-    /// Settings tab managing BYOK LLM provider (Gemini / Anthropic / OpenAI), DPAPI-encrypted API key,
-    /// live key/model verification and model discovery, shared library folder, auto-layout, and privacy toggle.
+    /// Modern dark-themed Settings tab organized into clean cards:
+    /// Provider & API Key (BYOK + live verification + Fetch Models), Canvas & Library, and Status Console.
     /// </summary>
     internal sealed class SettingsTab : Panel
     {
@@ -20,6 +20,7 @@ namespace GhCopilot.UI
         private readonly PasswordBox _apiKeyMaskedBox;
         private readonly TextBox _apiKeyPlainBox;
         private readonly CheckBox _showKeyCheck;
+        private readonly Panel _keyBadge;
         private readonly Label _keyStatusLabel;
         private readonly TextBox _modelIdBox;
         private readonly DropDown _fetchedModelsDropDown;
@@ -32,10 +33,14 @@ namespace GhCopilot.UI
         private readonly TextArea _statusBox;
         private bool _updatingModelFromPicker;
 
+        public event EventHandler? SettingsSaved;
+
         public SettingsTab()
         {
+            BackgroundColor = CopilotTheme.CanvasBg;
             AppSettings settings = AppSettings.Load();
 
+            // ── Card 1: Provider, API Key & Model ──
             _providerDropDown = new DropDown();
             _providerDropDown.Items.Add(new ListItem { Key = "Gemini", Text = "Gemini (Google)" });
             _providerDropDown.Items.Add(new ListItem { Key = "Anthropic", Text = "Anthropic (Claude)" });
@@ -44,27 +49,39 @@ namespace GhCopilot.UI
             _providerDropDown.SelectedKeyChanged += OnProviderChanged;
 
             _apiKeyMaskedBox = new PasswordBox();
+            CopilotTheme.StylePasswordBox(_apiKeyMaskedBox);
+
             _apiKeyPlainBox = new TextBox { PlaceholderText = "Paste API key..." };
+            CopilotTheme.StyleTextBox(_apiKeyPlainBox);
+
             _apiKeyHost = new Panel { Content = _apiKeyMaskedBox };
 
             _showKeyCheck = new CheckBox { Text = "Show / Edit Key" };
+            CopilotTheme.StyleCheckBox(_showKeyCheck);
             _showKeyCheck.CheckedChanged += OnShowKeyToggled;
 
-            var clearKeyButton = new Button { Text = "Clear Key" };
+            Button clearKeyButton = CopilotTheme.CreateDangerButton("Clear Key", "Delete the saved encrypted API key from disk");
+            clearKeyButton.MinimumSize = new Size(76, 24);
             clearKeyButton.Click += OnClearKeyClicked;
 
-            _keyStatusLabel = new Label();
+            _keyBadge = CopilotTheme.CreateBadge(
+                out _keyStatusLabel,
+                "Checking key...",
+                CopilotTheme.SurfaceElevated,
+                CopilotTheme.TextSecondary);
 
             _modelIdBox = new TextBox
             {
                 Text = settings.ModelId,
                 PlaceholderText = AppSettings.DefaultModelId
             };
+            CopilotTheme.StyleTextBox(_modelIdBox);
 
-            _verifyModelButton = new Button { Text = "Verify Key & Model" };
+            _verifyModelButton = CopilotTheme.CreateSecondaryButton("Verify Key & Model", "Test your API key and confirm the Model ID works (does not require Grasshopper)");
             _verifyModelButton.Click += OnVerifyModelClicked;
 
-            _fetchModelsButton = new Button { Text = "Fetch Models" };
+            _fetchModelsButton = CopilotTheme.CreateChipButton("Fetch Models", "Query available models from your API key and populate the picker");
+            _fetchModelsButton.MinimumSize = new Size(92, 26);
             _fetchModelsButton.Click += OnFetchModelsClicked;
 
             _fetchedModelsDropDown = new DropDown { Enabled = false };
@@ -77,74 +94,116 @@ namespace GhCopilot.UI
                 Text = settings.CustomEndpointUrl,
                 PlaceholderText = "(Optional) Custom API base URL"
             };
+            CopilotTheme.StyleTextBox(_customEndpointBox);
 
+            var keyToolsRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
+            keyToolsRow.BeginHorizontal();
+            keyToolsRow.Add(_showKeyCheck, xscale: true);
+            keyToolsRow.Add(clearKeyButton, xscale: false);
+            keyToolsRow.EndHorizontal();
+
+            var apiCardLayout = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 6) };
+            apiCardLayout.BeginVertical();
+            apiCardLayout.Add(CopilotTheme.CreateSectionHeader("Provider & API Key (BYOK)"));
+            apiCardLayout.Add(CopilotTheme.CreateLabel("LLM Provider", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()));
+            apiCardLayout.Add(_providerDropDown);
+            apiCardLayout.Add(CopilotTheme.CreateLabel("API Key (encrypted locally via Windows DPAPI)", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()));
+            apiCardLayout.Add(_apiKeyHost);
+            apiCardLayout.Add(keyToolsRow);
+            apiCardLayout.Add(_keyBadge);
+            apiCardLayout.Add(CopilotTheme.CreateHorizontalDivider());
+            apiCardLayout.Add(CopilotTheme.CreateLabel("Model ID", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()));
+            apiCardLayout.Add(_modelIdBox);
+            apiCardLayout.AddRow(_verifyModelButton, _fetchModelsButton);
+            apiCardLayout.Add(_fetchedModelsDropDown);
+            apiCardLayout.Add(CopilotTheme.CreateLabel("Custom Endpoint URL (optional)", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()));
+            apiCardLayout.Add(_customEndpointBox);
+            apiCardLayout.EndVertical();
+            Panel apiCard = CopilotTheme.CreateCard(apiCardLayout, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 10);
+
+            // ── Card 2: Canvas & Company Library ──
             _sharedFolderBox = new TextBox
             {
                 Text = settings.SharedLibraryFolder,
                 PlaceholderText = @"\\server\shared\gh-library"
             };
+            CopilotTheme.StyleTextBox(_sharedFolderBox);
 
-            var browseButton = new Button { Text = "Browse..." };
+            Button browseButton = CopilotTheme.CreateSecondaryButton("Browse...", "Choose a local or network folder with .ghuser / .gh clusters");
             browseButton.Click += OnBrowseFolderClicked;
-
-            _sendCanvasDataCheck = new CheckBox
-            {
-                Text = "Send canvas data & selected outputs (metadata only, never geometry)",
-                Checked = settings.SendCanvasData
-            };
 
             _autoLayoutCheck = new CheckBox
             {
-                Text = "Topological layered auto-layout (prevents overlapping nodes)",
+                Text = "Topological layered auto-layout (prevents overlaps)",
                 Checked = settings.AutoLayout
             };
+            CopilotTheme.StyleCheckBox(_autoLayoutCheck);
 
-            var saveButton = new Button { Text = "Save Settings" };
+            _sendCanvasDataCheck = new CheckBox
+            {
+                Text = "Send canvas metadata & outputs (never raw geometry)",
+                Checked = settings.SendCanvasData
+            };
+            CopilotTheme.StyleCheckBox(_sendCanvasDataCheck);
+
+            var folderRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
+            folderRow.BeginHorizontal();
+            folderRow.Add(_sharedFolderBox, xscale: true);
+            folderRow.Add(browseButton, xscale: false);
+            folderRow.EndHorizontal();
+
+            var canvasCardLayout = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 6) };
+            canvasCardLayout.BeginVertical();
+            canvasCardLayout.Add(CopilotTheme.CreateSectionHeader("Canvas & Library"));
+            canvasCardLayout.Add(CopilotTheme.CreateLabel("Shared Company Library Folder", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()));
+            canvasCardLayout.Add(folderRow);
+            canvasCardLayout.Add(_autoLayoutCheck);
+            canvasCardLayout.Add(_sendCanvasDataCheck);
+            canvasCardLayout.EndVertical();
+            Panel canvasCard = CopilotTheme.CreateCard(canvasCardLayout, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 10);
+
+            // ── Card 3: Save & Status Console ──
+            Button saveButton = CopilotTheme.CreatePrimaryButton("✓ Save Settings", "Persist provider, model, encrypted key, and canvas preferences");
             saveButton.Click += OnSaveClicked;
 
-            var dumpIndexButton = new Button { Text = "Debug: Dump Index JSON" };
+            Button dumpIndexButton = CopilotTheme.CreateSecondaryButton("Dump Index JSON", "Export the loaded Grasshopper component index for debugging");
             dumpIndexButton.Click += OnDumpIndexClicked;
 
             _statusBox = new TextArea
             {
                 ReadOnly = true,
                 Wrap = true,
-                Height = 72,
-                Text = string.Empty
+                Height = 76,
+                Text = "Ready. Paste an API key and click Fetch Models or Verify Key & Model."
             };
+            CopilotTheme.StyleTextArea(_statusBox, monospace: true);
+            _statusBox.TextColor = CopilotTheme.TextSecondary;
+
+            var consoleCardLayout = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 6) };
+            consoleCardLayout.BeginVertical();
+            consoleCardLayout.AddRow(saveButton, dumpIndexButton);
+            consoleCardLayout.Add(CopilotTheme.CreateSectionHeader("Verification & Status"));
+            consoleCardLayout.Add(_statusBox);
+            consoleCardLayout.EndVertical();
+            Panel consoleCard = CopilotTheme.CreateCard(consoleCardLayout, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 10);
 
             var layout = new DynamicLayout
             {
-                Padding = new Padding(8),
-                Spacing = new Size(6, 6)
+                Padding = new Padding(8, 6, 8, 8),
+                Spacing = new Size(8, 8)
             };
 
             layout.BeginVertical();
-            layout.Add(new Label { Text = "LLM Provider (BYOK):" });
-            layout.Add(_providerDropDown);
-            layout.Add(new Label { Text = "API Key (stored encrypted via Windows DPAPI):" });
-            layout.Add(_apiKeyHost);
-            layout.AddRow(_showKeyCheck, clearKeyButton);
-            layout.Add(_keyStatusLabel);
-            layout.Add(new Label { Text = "Model ID:" });
-            layout.Add(_modelIdBox);
-            layout.AddRow(_verifyModelButton, _fetchModelsButton);
-            layout.Add(_fetchedModelsDropDown);
-            layout.Add(new Label { Text = "Custom Endpoint URL (Optional):" });
-            layout.Add(_customEndpointBox);
-            layout.Add(new Label { Text = "Shared Company Library Folder:" });
-            layout.AddRow(_sharedFolderBox, browseButton);
-            layout.Add(_sendCanvasDataCheck);
-            layout.Add(_autoLayoutCheck);
-            layout.AddRow(saveButton, dumpIndexButton);
-            layout.Add(new Label { Text = "Settings / API Verification Status:" });
-            layout.Add(_statusBox);
+            layout.Add(apiCard);
+            layout.Add(canvasCard);
+            layout.Add(consoleCard);
             layout.EndVertical();
             layout.Add(null);
 
             Content = new Scrollable
             {
                 Border = BorderType.None,
+                BackgroundColor = CopilotTheme.CanvasBg,
                 ExpandContentWidth = true,
                 ExpandContentHeight = false,
                 Content = layout
@@ -161,6 +220,12 @@ namespace GhCopilot.UI
         {
             _apiKeyMaskedBox.Text = value;
             _apiKeyPlainBox.Text = value;
+        }
+
+        private void SetConsoleStatus(string message, Color? color = null)
+        {
+            _statusBox.Text = message;
+            _statusBox.TextColor = color ?? CopilotTheme.TextPrimary;
         }
 
         private bool TryResolveEffectiveApiKey(out string apiKey, out string sourceLabel)
@@ -220,11 +285,11 @@ namespace GhCopilot.UI
                 SecretStore.DeleteApiKey();
                 SetEnteredApiKey(string.Empty);
                 RefreshKeyStatus();
-                _statusBox.Text = "Saved API key cleared from disk.";
+                SetConsoleStatus("Saved API key cleared from disk.", CopilotTheme.WarningAmber);
             }
             catch (Exception ex)
             {
-                _statusBox.Text = $"Could not clear saved API key: {ex.Message}";
+                SetConsoleStatus($"Could not clear saved API key: {ex.Message}", CopilotTheme.DangerRose);
             }
         }
 
@@ -259,7 +324,7 @@ namespace GhCopilot.UI
             if (!string.IsNullOrWhiteSpace(selectedModel))
             {
                 _modelIdBox.Text = selectedModel;
-                _statusBox.Text = $"Selected model '{selectedModel}'. Click Save Settings to persist.";
+                SetConsoleStatus($"Selected model '{selectedModel}'. Click Save Settings to persist.", CopilotTheme.AccentCyan);
             }
         }
 
@@ -270,15 +335,21 @@ namespace GhCopilot.UI
 
             if (hasStoredKey)
             {
-                _keyStatusLabel.Text = "Key status: Encrypted DPAPI key saved on disk.";
+                _keyBadge.BackgroundColor = CopilotTheme.AccentEmeraldDark;
+                _keyStatusLabel.TextColor = CopilotTheme.AccentEmerald;
+                _keyStatusLabel.Text = "● Encrypted DPAPI key saved on disk";
             }
             else if (hasEnvKey)
             {
-                _keyStatusLabel.Text = $"Key status: Using {SecretStore.EnvVarName} environment variable.";
+                _keyBadge.BackgroundColor = CopilotTheme.AccentCyanDark;
+                _keyStatusLabel.TextColor = CopilotTheme.AccentCyan;
+                _keyStatusLabel.Text = $"● Using {SecretStore.EnvVarName} environment variable";
             }
             else
             {
-                _keyStatusLabel.Text = "Key status: No API key configured.";
+                _keyBadge.BackgroundColor = CopilotTheme.WarningAmberDark;
+                _keyStatusLabel.TextColor = CopilotTheme.WarningAmber;
+                _keyStatusLabel.Text = "○ No API key configured yet";
             }
         }
 
@@ -338,6 +409,7 @@ namespace GhCopilot.UI
                 }
 
                 RefreshKeyStatus();
+                SettingsSaved?.Invoke(this, EventArgs.Empty);
 
                 string companyReloadMessage = string.Empty;
                 if (folderChanged && CopilotHostRegistry.GrasshopperBridge != null)
@@ -345,11 +417,13 @@ namespace GhCopilot.UI
                     companyReloadMessage = " " + CopilotHostRegistry.GrasshopperBridge.ReloadCompanyLibrary();
                 }
 
-                _statusBox.Text = $"Saved ({settings.Provider} / {settings.ModelId}, AutoLayout={settings.AutoLayout}){(savedNewKey ? " + encrypted API key." : ".")}{companyReloadMessage}";
+                SetConsoleStatus(
+                    $"Saved ({settings.Provider} / {settings.ModelId}, AutoLayout={settings.AutoLayout}){(savedNewKey ? " + encrypted API key." : ".")}{companyReloadMessage}",
+                    CopilotTheme.AccentEmerald);
             }
             catch (Exception ex)
             {
-                _statusBox.Text = $"Failed to save settings: {ex.Message}";
+                SetConsoleStatus($"Failed to save settings: {ex.Message}", CopilotTheme.DangerRose);
             }
         }
 
@@ -357,7 +431,7 @@ namespace GhCopilot.UI
         {
             if (!TryResolveEffectiveApiKey(out string apiKey, out string sourceLabel))
             {
-                _statusBox.Text = $"No API key entered or saved (and {SecretStore.EnvVarName} is not set). Paste an API key above first.";
+                SetConsoleStatus($"No API key entered or saved (and {SecretStore.EnvVarName} is not set). Paste an API key above first.", CopilotTheme.WarningAmber);
                 return;
             }
 
@@ -372,16 +446,16 @@ namespace GhCopilot.UI
                 : _customEndpointBox.Text.Trim();
 
             SetApiButtonsEnabled(false);
-            _statusBox.Text = $"Testing {provider} model '{modelId}' using {sourceLabel}...";
+            SetConsoleStatus($"Testing {provider} model '{modelId}' using {sourceLabel}...", CopilotTheme.AccentCyan);
             try
             {
                 using var client = new GeminiClient();
-                (_, string message) = await client
+                (bool isAvailable, string message) = await client
                     .VerifyConfiguredModelAsync(apiKey, modelId, default, provider, endpoint)
                     .ConfigureAwait(false);
                 Application.Instance?.AsyncInvoke(() =>
                 {
-                    _statusBox.Text = message;
+                    SetConsoleStatus(message, isAvailable ? CopilotTheme.AccentEmerald : CopilotTheme.WarningAmber);
                     SetApiButtonsEnabled(true);
                 });
             }
@@ -390,7 +464,7 @@ namespace GhCopilot.UI
                 string safe = GeminiClient.ScrubSecret(ex.Message, apiKey);
                 Application.Instance?.AsyncInvoke(() =>
                 {
-                    _statusBox.Text = $"Verification error: {safe}";
+                    SetConsoleStatus($"Verification error: {safe}", CopilotTheme.DangerRose);
                     SetApiButtonsEnabled(true);
                 });
             }
@@ -400,7 +474,7 @@ namespace GhCopilot.UI
         {
             if (!TryResolveEffectiveApiKey(out string apiKey, out string sourceLabel))
             {
-                _statusBox.Text = $"No API key entered or saved (and {SecretStore.EnvVarName} is not set). Paste an API key above first.";
+                SetConsoleStatus($"No API key entered or saved (and {SecretStore.EnvVarName} is not set). Paste an API key above first.", CopilotTheme.WarningAmber);
                 return;
             }
 
@@ -412,7 +486,7 @@ namespace GhCopilot.UI
                 : _customEndpointBox.Text.Trim();
 
             SetApiButtonsEnabled(false);
-            _statusBox.Text = $"Fetching available {provider} models using {sourceLabel}...";
+            SetConsoleStatus($"Fetching available {provider} models using {sourceLabel}...", CopilotTheme.AccentCyan);
             try
             {
                 using var client = new GeminiClient();
@@ -445,7 +519,7 @@ namespace GhCopilot.UI
                             _fetchedModelsDropDown.Items.Add(new ListItem { Key = string.Empty, Text = "(No models returned)" });
                             _fetchedModelsDropDown.SelectedIndex = 0;
                             _fetchedModelsDropDown.Enabled = false;
-                            _statusBox.Text = $"API key accepted by {provider}, but zero models were returned.";
+                            SetConsoleStatus($"API key accepted by {provider}, but zero models were returned.", CopilotTheme.WarningAmber);
                         }
                         else
                         {
@@ -460,9 +534,11 @@ namespace GhCopilot.UI
 
                             string current = _modelIdBox.Text?.Trim() ?? string.Empty;
                             bool currentExists = filtered.Any(m => string.Equals(m, current, StringComparison.OrdinalIgnoreCase));
-                            _statusBox.Text = currentExists
-                                ? $"API key valid! Loaded {filtered.Count} {provider} model(s). Current model '{current}' is available."
-                                : $"API key valid! Loaded {filtered.Count} {provider} model(s). Current model '{current}' was not found — pick one from the dropdown above and click Save Settings.";
+                            SetConsoleStatus(
+                                currentExists
+                                    ? $"API key valid! Loaded {filtered.Count} {provider} model(s). Current model '{current}' is available."
+                                    : $"API key valid! Loaded {filtered.Count} {provider} model(s). Current model '{current}' was not found — pick one above and click Save Settings.",
+                                currentExists ? CopilotTheme.AccentEmerald : CopilotTheme.WarningAmber);
                         }
                     }
                     finally
@@ -477,7 +553,7 @@ namespace GhCopilot.UI
                 string safe = GeminiClient.ScrubSecret(ex.Message, apiKey);
                 Application.Instance?.AsyncInvoke(() =>
                 {
-                    _statusBox.Text = $"Fetch models failed: {safe}";
+                    SetConsoleStatus($"Fetch models failed: {safe}", CopilotTheme.DangerRose);
                     SetApiButtonsEnabled(true);
                 });
             }
@@ -496,15 +572,15 @@ namespace GhCopilot.UI
                 IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
                 if (bridge is null)
                 {
-                    _statusBox.Text = "Open Grasshopper first to initialize the component index.";
+                    SetConsoleStatus("Open Grasshopper first to initialize the component index.", CopilotTheme.WarningAmber);
                     return;
                 }
 
-                _statusBox.Text = bridge.DumpIndexToJson();
+                SetConsoleStatus(bridge.DumpIndexToJson(), CopilotTheme.AccentEmerald);
             }
             catch (Exception ex)
             {
-                _statusBox.Text = $"Index dump failed: {ex.Message}";
+                SetConsoleStatus($"Index dump failed: {ex.Message}", CopilotTheme.DangerRose);
             }
         }
     }

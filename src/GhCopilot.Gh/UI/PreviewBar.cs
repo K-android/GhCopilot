@@ -7,10 +7,13 @@ using GhCopilot.Core.Host;
 namespace GhCopilot.UI
 {
     /// <summary>
-    /// Persistent preview action bar driving GroupPreview Accept / Reject.
+    /// Persistent studio preview action footer driving GroupPreview / ChatTurnTransaction Accept and Reject.
     /// </summary>
     internal sealed class PreviewBar : Panel
     {
+        private readonly Panel _card;
+        private readonly Panel _pill;
+        private readonly Label _pillLabel;
         private readonly Label _previewStatusLabel;
         private readonly Button _acceptButton;
         private readonly Button _rejectButton;
@@ -19,37 +22,48 @@ namespace GhCopilot.UI
 
         public PreviewBar()
         {
-            _previewStatusLabel = new Label
-            {
-                Text = "No active preview on canvas."
-            };
+            BackgroundColor = CopilotTheme.CanvasBg;
 
-            _acceptButton = new Button
-            {
-                Text = "Accept Preview",
-                Enabled = false
-            };
+            _pill = CopilotTheme.CreateBadge(
+                out _pillLabel,
+                "IDLE",
+                CopilotTheme.SurfaceElevated,
+                CopilotTheme.TextMuted);
+
+            _previewStatusLabel = CopilotTheme.CreateLabel(
+                "No pending preview on canvas.",
+                CopilotTheme.TextSecondary,
+                CopilotTheme.SmallFont());
+
+            _acceptButton = CopilotTheme.CreatePrimaryButton(
+                "✓ Accept",
+                "Keep the preview changes on the Grasshopper canvas as one undo step");
+            _acceptButton.Enabled = false;
             _acceptButton.Click += OnAcceptClicked;
 
-            _rejectButton = new Button
-            {
-                Text = "Reject Preview",
-                Enabled = false
-            };
+            _rejectButton = CopilotTheme.CreateDangerButton(
+                "✕ Reject",
+                "Roll back only this turn's preview changes cleanly");
+            _rejectButton.Enabled = false;
             _rejectButton.Click += OnRejectClicked;
 
             var layout = new DynamicLayout
             {
-                Padding = new Padding(8),
-                Spacing = new Size(6, 6)
+                Padding = Padding.Empty,
+                Spacing = new Size(8, 6)
             };
 
             layout.BeginVertical();
-            layout.Add(_previewStatusLabel);
+            layout.BeginHorizontal();
+            layout.Add(_pill, xscale: false);
+            layout.Add(_previewStatusLabel, xscale: true);
+            layout.EndHorizontal();
             layout.AddRow(_acceptButton, _rejectButton);
             layout.EndVertical();
 
-            Content = layout;
+            _card = CopilotTheme.CreateCard(layout, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 8);
+            Content = _card;
+
             AttachBridgeEvents();
             CopilotHostRegistry.GrasshopperBridgeRegistered += OnBridgeRegistered;
             RefreshState();
@@ -120,9 +134,35 @@ namespace GhCopilot.UI
 
             _acceptButton.Enabled = hasPreview && !_isBusy;
             _rejectButton.Enabled = hasPreview && !_isBusy;
-            _previewStatusLabel.Text = hasPreview
-                ? "Preview ready: Accept to keep or Reject to undo cleanly."
-                : "No active preview on canvas.";
+
+            if (hasPreview)
+            {
+                CopilotTheme.SetCardBorder(_card, CopilotTheme.WarningAmber);
+                _pill.BackgroundColor = CopilotTheme.WarningAmberDark;
+                _pillLabel.TextColor = CopilotTheme.WarningAmber;
+                _pillLabel.Text = "PREVIEW READY";
+                _previewStatusLabel.TextColor = CopilotTheme.TextPrimary;
+                _previewStatusLabel.Text = "Review on canvas, then Accept or Reject.";
+            }
+            else if (_isBusy)
+            {
+                CopilotTheme.SetCardBorder(_card, CopilotTheme.AccentCyan);
+                _pill.BackgroundColor = CopilotTheme.AccentCyanDark;
+                _pillLabel.TextColor = CopilotTheme.AccentCyan;
+                _pillLabel.Text = "WORKING";
+                _previewStatusLabel.TextColor = CopilotTheme.TextSecondary;
+                _previewStatusLabel.Text = "Generating and validating graph turn...";
+            }
+            else
+            {
+                CopilotTheme.SetCardBorder(_card, CopilotTheme.BorderSubtle);
+                _pill.BackgroundColor = CopilotTheme.SurfaceElevated;
+                _pillLabel.TextColor = CopilotTheme.TextMuted;
+                _pillLabel.Text = "IDLE";
+                _previewStatusLabel.TextColor = CopilotTheme.TextSecondary;
+                _previewStatusLabel.Text = "No pending preview on canvas.";
+            }
+
             PreviewStateChanged?.Invoke(this, EventArgs.Empty);
         }
 

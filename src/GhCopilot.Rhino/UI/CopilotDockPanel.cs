@@ -15,6 +15,7 @@ namespace GhCopilot.Rhino.UI
     {
         public CopilotDockPanel()
         {
+            BackgroundColor = CopilotTheme.CanvasBg;
             StartupDiagnostics.Write("Rhino dock panel constructor entered.");
             try
             {

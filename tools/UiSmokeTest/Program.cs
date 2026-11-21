@@ -53,6 +53,23 @@ namespace GhCopilot.UiSmokeTest
                         wpfContent.Measure(new System.Windows.Size(280, double.PositiveInfinity));
                         wpfContent.Arrange(new System.Windows.Rect(0, 0, 280, 320));
                         wpfContent.UpdateLayout();
+
+                        // Also exercise switching to Settings tab and back under native WPF layout.
+                        if (panel.Content != null)
+                        {
+                            MethodInfo? selectTab = panel.Content.GetType().GetMethod("SelectTab", BindingFlags.Instance | BindingFlags.Public);
+                            if (selectTab != null)
+                            {
+                                selectTab.Invoke(panel.Content, new object[] { true });
+                                native.UpdateLayout();
+                                wpfContent.Measure(new System.Windows.Size(340, 560));
+                                wpfContent.Arrange(new System.Windows.Rect(0, 0, 340, 560));
+                                wpfContent.UpdateLayout();
+
+                                selectTab.Invoke(panel.Content, new object[] { false });
+                                native.UpdateLayout();
+                            }
+                        }
                     }
                     Console.WriteLine("PASS: panel construction, native WPF layout, and disposal.");
                 }
