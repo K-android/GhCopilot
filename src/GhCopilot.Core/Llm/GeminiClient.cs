@@ -41,6 +41,20 @@ namespace GhCopilot.Core.Llm
         private readonly bool _ownsHttpClient;
         private readonly string _baseUrl;
 
+#if !NET5_0_OR_GREATER
+        static GeminiClient()
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            }
+            catch (Exception)
+            {
+                // Ignore if OS/runtime policy restricts SecurityProtocol mutation.
+            }
+        }
+#endif
+
         public GeminiClient()
             : this(null, DefaultBaseUrl)
         {
@@ -72,12 +86,11 @@ namespace GhCopilot.Core.Llm
         public async Task<IReadOnlyList<string>> ListModelsAsync(
             string apiKey,
             TimeSpan? timeout = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            string? customEndpointUrl = null)
         {
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                throw new ArgumentException("API key must not be empty.", nameof(apiKey));
-            }
+            string cleanKey = SanitizeApiKey(apiKey);
+            string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? _baseUrl : customEndpointUrl!.TrimEnd('/');
 
             var models = new List<string>();
             string? pageToken = null;
@@ -86,15 +99,15 @@ namespace GhCopilot.Core.Llm
             do
             {
                 string url = string.IsNullOrEmpty(pageToken)
-                    ? $"{_baseUrl}/models"
-                    : $"{_baseUrl}/models?pageToken={Uri.EscapeDataString(pageToken)}";
+                    ? $"{baseEndpoint}/models"
+                    : $"{baseEndpoint}/models?pageToken={Uri.EscapeDataString(pageToken)}";
 
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Add("x-goog-api-key", apiKey.Trim());
+                request.Headers.Add("x-goog-api-key", cleanKey);
 
-                string body = await SendAndReadBodyAsync(request, apiKey, effectiveTimeout, cancellationToken).ConfigureAwait(false);
+                string body = await SendAndReadBodyAsync(request, cleanKey, effectiveTimeout, cancellationToken).ConfigureAwait(false);
 
-                using JsonDocument doc = ParseJsonDocument(body, apiKey);
+                using JsonDocument doc = ParseJsonDocument(body, cleanKey);
                 if (doc.RootElement.TryGetProperty("models", out JsonElement modelsArray) &&
                     modelsArray.ValueKind == JsonValueKind.Array)
                 {
@@ -123,6 +136,42 @@ namespace GhCopilot.Core.Llm
         }
 
         /// <summary>
+        /// Lists available model IDs for the active BYOK provider (Gemini, Anthropic, or OpenAI).
+        /// </summary>
+        public async Task<IReadOnlyList<string>> ListAvailableModelsAsync(
+            string apiKey,
+            string provider = "Gemini",
+            string? customEndpointUrl = null,
+            TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            string cleanKey = SanitizeApiKey(apiKey);
+            string normalizedProvider = NormalizeProvider(provider);
+            TimeSpan effectiveTimeout = timeout ?? TimeSpan.FromSeconds(15);
+
+            if (normalizedProvider == "Anthropic")
+            {
+                string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? AnthropicBaseUrl : customEndpointUrl!.TrimEnd('/');
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseEndpoint}/models");
+                req.Headers.Add("x-api-key", cleanKey);
+                req.Headers.Add("anthropic-version", "2023-06-01");
+                string body = await SendAndReadBodyAsync(req, cleanKey, effectiveTimeout, cancellationToken).ConfigureAwait(false);
+                return ParseDataArrayModelIds(body, cleanKey);
+            }
+
+            if (normalizedProvider == "OpenAI")
+            {
+                string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? OpenAiBaseUrl : customEndpointUrl!.TrimEnd('/');
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseEndpoint}/models");
+                req.Headers.Add("Authorization", $"Bearer {cleanKey}");
+                string body = await SendAndReadBodyAsync(req, cleanKey, effectiveTimeout, cancellationToken).ConfigureAwait(false);
+                return ParseDataArrayModelIds(body, cleanKey);
+            }
+
+            return await ListModelsAsync(cleanKey, effectiveTimeout, cancellationToken, customEndpointUrl).ConfigureAwait(false);
+        }
+
+        /// <summary>
         /// Checks whether the configured model ID is available for the active provider.
         /// </summary>
         public async Task<(bool IsAvailable, string Message)> VerifyConfiguredModelAsync(
@@ -142,26 +191,28 @@ namespace GhCopilot.Core.Llm
 
             try
             {
+                string cleanKey = SanitizeApiKey(apiKey);
+
                 if (normalizedProvider == "Anthropic")
                 {
                     string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? AnthropicBaseUrl : customEndpointUrl!.TrimEnd('/');
                     using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseEndpoint}/models");
-                    req.Headers.Add("x-api-key", apiKey.Trim());
+                    req.Headers.Add("x-api-key", cleanKey);
                     req.Headers.Add("anthropic-version", "2023-06-01");
-                    string body = await SendAndReadBodyAsync(req, apiKey, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
-                    return VerifyModelInDataArray(body, normalizedTarget, "Anthropic", apiKey);
+                    string body = await SendAndReadBodyAsync(req, cleanKey, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
+                    return VerifyModelInDataArray(body, normalizedTarget, "Anthropic", cleanKey);
                 }
 
                 if (normalizedProvider == "OpenAI")
                 {
                     string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? OpenAiBaseUrl : customEndpointUrl!.TrimEnd('/');
                     using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseEndpoint}/models");
-                    req.Headers.Add("Authorization", $"Bearer {apiKey.Trim()}");
-                    string body = await SendAndReadBodyAsync(req, apiKey, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
-                    return VerifyModelInDataArray(body, normalizedTarget, "OpenAI", apiKey);
+                    req.Headers.Add("Authorization", $"Bearer {cleanKey}");
+                    string body = await SendAndReadBodyAsync(req, cleanKey, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
+                    return VerifyModelInDataArray(body, normalizedTarget, "OpenAI", cleanKey);
                 }
 
-                IReadOnlyList<string> available = await ListModelsAsync(apiKey, TimeSpan.FromSeconds(15), cancellationToken)
+                IReadOnlyList<string> available = await ListModelsAsync(cleanKey, TimeSpan.FromSeconds(15), cancellationToken, customEndpointUrl)
                     .ConfigureAwait(false);
 
                 foreach (string model in available)
@@ -172,18 +223,27 @@ namespace GhCopilot.Core.Llm
                     }
                 }
 
-                return (false, $"Warning: configured model '{normalizedTarget}' was not returned by ListModels ({available.Count} models available).");
+                string suggestions = FormatSuggestedModels(available, "gemini");
+                return (false, $"Warning: configured model '{normalizedTarget}' was not returned by ListModels ({available.Count} models available).{suggestions}");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (GeminiApiException ex)
             {
                 return (false, $"Model check failed: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Model check failed: {ScrubSecret(ex.Message, apiKey)}");
             }
         }
 
         /// <summary>
         /// Calls the configured LLM provider using structured JSON output.
         /// </summary>
-        public Task<string> GenerateGraphJsonAsync(
+        public async Task<string> GenerateGraphJsonAsync(
             string apiKey,
             string modelId,
             string systemInstruction,
@@ -194,17 +254,18 @@ namespace GhCopilot.Core.Llm
             string provider = "Gemini",
             string? customEndpointUrl = null)
         {
+            string cleanKey = SanitizeApiKey(apiKey);
             string normalizedProvider = NormalizeProvider(provider);
             if (normalizedProvider == "Anthropic")
             {
                 string augmentedSystem = $"{systemInstruction}\n\nReturn ONLY raw JSON strictly conforming to this JSON Schema (no markdown fences or prose):\n{responseJsonSchema.GetRawText()}";
-                return SendAnthropicAsync(apiKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, stripCodeFences: true, timeout, customEndpointUrl, cancellationToken);
+                return await SendAnthropicAsync(cleanKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, stripCodeFences: true, timeout, customEndpointUrl, cancellationToken).ConfigureAwait(false);
             }
 
             if (normalizedProvider == "OpenAI")
             {
                 string augmentedSystem = $"{systemInstruction}\n\nReturn ONLY a JSON object strictly conforming to this JSON Schema:\n{responseJsonSchema.GetRawText()}";
-                return SendOpenAiAsync(apiKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, jsonMode: true, timeout, customEndpointUrl, cancellationToken);
+                return await SendOpenAiAsync(cleanKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, jsonMode: true, timeout, customEndpointUrl, cancellationToken).ConfigureAwait(false);
             }
 
             object generationConfig = new
@@ -214,16 +275,41 @@ namespace GhCopilot.Core.Llm
                 responseJsonSchema
             };
 
-            return SendGeminiGenerateContentAsync(
-                apiKey,
-                modelId,
-                systemInstruction,
-                userPrompt,
-                generationConfig,
-                stripCodeFences: true,
-                timeout,
-                customEndpointUrl,
-                cancellationToken);
+            try
+            {
+                return await SendGeminiGenerateContentAsync(
+                    cleanKey,
+                    modelId,
+                    systemInstruction,
+                    userPrompt,
+                    generationConfig,
+                    stripCodeFences: true,
+                    timeout,
+                    customEndpointUrl,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (GeminiApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && IsSchemaFieldError(ex.Message))
+            {
+                // Fallback for Gemini endpoints/models that reject responseJsonSchema or strict JSON Schema keywords:
+                // keep responseMimeType = application/json and enforce the schema in systemInstruction + local validator.
+                string fallbackSystem = $"{systemInstruction}\n\nReturn ONLY a raw JSON object strictly conforming to this JSON Schema (no markdown fences):\n{responseJsonSchema.GetRawText()}";
+                object fallbackConfig = new
+                {
+                    temperature = 0.1,
+                    responseMimeType = "application/json"
+                };
+
+                return await SendGeminiGenerateContentAsync(
+                    cleanKey,
+                    modelId,
+                    fallbackSystem,
+                    userPrompt,
+                    fallbackConfig,
+                    stripCodeFences: true,
+                    timeout,
+                    customEndpointUrl,
+                    cancellationToken).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -239,15 +325,16 @@ namespace GhCopilot.Core.Llm
             string provider = "Gemini",
             string? customEndpointUrl = null)
         {
+            string cleanKey = SanitizeApiKey(apiKey);
             string normalizedProvider = NormalizeProvider(provider);
             if (normalizedProvider == "Anthropic")
             {
-                return SendAnthropicAsync(apiKey, modelId, systemInstruction, userPrompt, temperature: 0.2, stripCodeFences: false, timeout, customEndpointUrl, cancellationToken);
+                return SendAnthropicAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, stripCodeFences: false, timeout, customEndpointUrl, cancellationToken);
             }
 
             if (normalizedProvider == "OpenAI")
             {
-                return SendOpenAiAsync(apiKey, modelId, systemInstruction, userPrompt, temperature: 0.2, jsonMode: false, timeout, customEndpointUrl, cancellationToken);
+                return SendOpenAiAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, jsonMode: false, timeout, customEndpointUrl, cancellationToken);
             }
 
             object generationConfig = new
@@ -256,7 +343,7 @@ namespace GhCopilot.Core.Llm
             };
 
             return SendGeminiGenerateContentAsync(
-                apiKey,
+                cleanKey,
                 modelId,
                 systemInstruction,
                 userPrompt,
@@ -413,6 +500,104 @@ namespace GhCopilot.Core.Llm
             return ExtractOpenAiText(responseBody, apiKey, jsonMode);
         }
 
+        private static string SanitizeApiKey(string apiKey)
+        {
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                throw new ArgumentException("API key must not be empty.", nameof(apiKey));
+            }
+
+            string cleaned = apiKey.Trim().Replace("\r", string.Empty).Replace("\n", string.Empty);
+            if (cleaned.Length >= 2 &&
+                ((cleaned[0] == '"' && cleaned[cleaned.Length - 1] == '"') ||
+                 (cleaned[0] == '\'' && cleaned[cleaned.Length - 1] == '\'')))
+            {
+                cleaned = cleaned.Substring(1, cleaned.Length - 2).Trim();
+            }
+
+            if (string.IsNullOrWhiteSpace(cleaned))
+            {
+                throw new ArgumentException("API key must not be empty.", nameof(apiKey));
+            }
+
+            foreach (char c in cleaned)
+            {
+                if (c < 0x21 || c > 0x7E)
+                {
+                    throw new GeminiApiException("API key contains invalid whitespace or non-ASCII characters. Re-copy the key without spaces or line breaks.");
+                }
+            }
+
+            return cleaned;
+        }
+
+        private static bool IsSchemaFieldError(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            return message.IndexOf("responseJsonSchema", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   message.IndexOf("response_json_schema", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   message.IndexOf("additionalProperties", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static IReadOnlyList<string> ParseDataArrayModelIds(string body, string apiKey)
+        {
+            var models = new List<string>();
+            using JsonDocument doc = ParseJsonDocument(body, apiKey);
+            if (doc.RootElement.TryGetProperty("data", out JsonElement dataArray) &&
+                dataArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement item in dataArray.EnumerateArray())
+                {
+                    if (item.TryGetProperty("id", out JsonElement idEl) &&
+                        idEl.ValueKind == JsonValueKind.String)
+                    {
+                        string id = (idEl.GetString() ?? string.Empty).Trim();
+                        if (!string.IsNullOrWhiteSpace(id))
+                        {
+                            models.Add(id);
+                        }
+                    }
+                }
+            }
+
+            return models;
+        }
+
+        private static string FormatSuggestedModels(IReadOnlyList<string> available, string preferredPrefix)
+        {
+            if (available.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            var picks = new List<string>(6);
+            foreach (string m in available)
+            {
+                if (m.StartsWith(preferredPrefix, StringComparison.OrdinalIgnoreCase) &&
+                    m.IndexOf("embedding", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    m.IndexOf("imagen", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    m.IndexOf("veo", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    picks.Add(m);
+                    if (picks.Count == 6) break;
+                }
+            }
+
+            if (picks.Count == 0)
+            {
+                for (int i = 0; i < Math.Min(6, available.Count); i++)
+                {
+                    picks.Add(available[i]);
+                }
+            }
+
+            return " Try one of: " + string.Join(", ", picks);
+        }
+
         private static void ValidateKeyAndModel(string apiKey, string modelId, out string normalizedModelId)
         {
             if (string.IsNullOrWhiteSpace(apiKey))
@@ -467,7 +652,7 @@ namespace GhCopilot.Core.Llm
             return trimmed;
         }
 
-        internal static string ScrubSecret(string? message, string? secret)
+        public static string ScrubSecret(string? message, string? secret)
         {
             if (string.IsNullOrEmpty(message))
             {
@@ -506,8 +691,11 @@ namespace GhCopilot.Core.Llm
             }
             catch (HttpRequestException ex)
             {
+                string detail = ex.InnerException != null && !string.IsNullOrWhiteSpace(ex.InnerException.Message)
+                    ? $"{ex.Message} ({ex.InnerException.Message})"
+                    : ex.Message;
                 throw new GeminiApiException(
-                    $"LLM API network error: {ScrubSecret(ex.Message, apiKey)}",
+                    $"LLM API network error: {ScrubSecret(detail, apiKey)}",
                     statusCode: null,
                     isTransient: true,
                     innerException: ex);
@@ -553,7 +741,9 @@ namespace GhCopilot.Core.Llm
                     }
                 }
 
-                return (false, $"Warning: '{targetModel}' was not returned by {providerLabel} models list ({count} models available).");
+                IReadOnlyList<string> ids = ParseDataArrayModelIds(body, apiKey);
+                string suggestions = FormatSuggestedModels(ids, providerLabel == "Anthropic" ? "claude" : "gpt");
+                return (false, $"Warning: '{targetModel}' was not returned by {providerLabel} models list ({count} models available).{suggestions}");
             }
 
             return (true, $"{providerLabel} endpoint reachable.");

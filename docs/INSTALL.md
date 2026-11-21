@@ -41,7 +41,7 @@ Unblock-File .\ghcopilot-0.1.0-rh8_0-any.yak
 2. Open the **Settings** tab:
    - Choose your **LLM Provider** (`Gemini`, `Anthropic`, or `OpenAI`).
    - Paste your **API Key** (stored DPAPI-encrypted per-user at `%LOCALAPPDATA%\GhCopilot\api-key.dpapi`).
-   - Confirm **Model ID** (e.g., `gemini-3.6-flash`, `claude-opus-4-6`, or `gpt-4.1`) and click **Verify Model**.
+   - Confirm **Model ID** (e.g., `gemini-2.5-flash`, `claude-opus-4-6`, or `gpt-4.1`) and click **Verify Key & Model** (or **Fetch Models** to pick from your key's available models).
    - Set **Shared Library Folder** (local path or `\\server\share\gh-library`).
    - Keep **Send canvas data** unchecked unless approved for your environment.
    - Click **Save Settings**.

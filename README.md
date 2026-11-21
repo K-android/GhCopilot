@@ -16,7 +16,7 @@ See [docs/CHAT.md](docs/CHAT.md) for behavior, privacy, token estimates, and the
 
 1. Download **`dist/GhCopilot-Setup-0.1.0.exe`** (no PowerShell, Yak CLI, or manual `Unblock-File` required).
 2. Double-click **`GhCopilot-Setup-0.1.0.exe`** and click **Install / Update GH Copilot** (or run silently with `--install`).
-   - Optionally enter your **API Key** (saved DPAPI-encrypted to `%LOCALAPPDATA%\GhCopilot\api-key.dpapi`), **Model ID** (`gemini-3.6-flash`), and **Shared Library Folder**.
+   - Optionally enter your **API Key** (saved DPAPI-encrypted to `%LOCALAPPDATA%\GhCopilot\api-key.dpapi`), **Model ID** (`gemini-2.5-flash`), and **Shared Library Folder**.
 3. Open **Rhino 8** and **Grasshopper**:
    - The **GH Copilot** dockable panel (`GhCopilot` command) and Grasshopper **`GH Copilot`** menu load automatically on startup.
 

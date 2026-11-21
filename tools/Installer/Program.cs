@@ -17,7 +17,7 @@ namespace GhCopilot.Installer
     {
         private const string Version = "0.1.0";
         private const string RhinoPlugInId = "8A4E9C12-3B7D-4F6A-9E21-5C8D7A1B3E40";
-        private const string DefaultModelId = "gemini-3.6-flash";
+        private const string DefaultModelId = "gemini-2.5-flash";
         private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("GhCopilot.GeminiApiKey.v1");
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -336,7 +336,7 @@ namespace GhCopilot.Installer
 
             _modelBox = new TextBox
             {
-                Text = "gemini-3.6-flash",
+                Text = "gemini-2.5-flash",
                 Location = new Point(16, 148),
                 Width = 488
             };

@@ -47,11 +47,35 @@ namespace GhCopilot.Core.Settings
                 Directory.CreateDirectory(dir);
             }
 
-            byte[] plainBytes = Encoding.UTF8.GetBytes(apiKey.Trim());
+            string cleaned = NormalizeApiKey(apiKey);
+            if (string.IsNullOrWhiteSpace(cleaned))
+            {
+                throw new ArgumentException("API key must not be empty.", nameof(apiKey));
+            }
+
+            byte[] plainBytes = Encoding.UTF8.GetBytes(cleaned);
             byte[] protectedBytes = ProtectedData.Protect(plainBytes, Entropy, DataProtectionScope.CurrentUser);
             Array.Clear(plainBytes, 0, plainBytes.Length);
 
             File.WriteAllBytes(path, protectedBytes);
+        }
+
+        internal static string NormalizeApiKey(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return string.Empty;
+            }
+
+            string trimmed = raw!.Trim().Replace("\r", string.Empty).Replace("\n", string.Empty);
+            if (trimmed.Length >= 2 &&
+                ((trimmed[0] == '"' && trimmed[trimmed.Length - 1] == '"') ||
+                 (trimmed[0] == '\'' && trimmed[trimmed.Length - 1] == '\'')))
+            {
+                trimmed = trimmed.Substring(1, trimmed.Length - 2).Trim();
+            }
+
+            return trimmed;
         }
 
         public static bool TryLoadApiKey(out string? apiKey, string? filePath = null, bool allowEnvironmentFallback = true)
@@ -70,7 +94,7 @@ namespace GhCopilot.Core.Settings
                 {
                     byte[] protectedBytes = File.ReadAllBytes(path);
                     byte[] plainBytes = ProtectedData.Unprotect(protectedBytes, Entropy, DataProtectionScope.CurrentUser);
-                    string decrypted = Encoding.UTF8.GetString(plainBytes).Trim();
+                    string decrypted = NormalizeApiKey(Encoding.UTF8.GetString(plainBytes));
                     Array.Clear(plainBytes, 0, plainBytes.Length);
 
                     if (!string.IsNullOrWhiteSpace(decrypted))
@@ -87,10 +111,10 @@ namespace GhCopilot.Core.Settings
 
             if (allowEnvironmentFallback)
             {
-                string? envKey = Environment.GetEnvironmentVariable(EnvVarName);
+                string envKey = NormalizeApiKey(Environment.GetEnvironmentVariable(EnvVarName));
                 if (!string.IsNullOrWhiteSpace(envKey))
                 {
-                    apiKey = envKey!.Trim();
+                    apiKey = envKey;
                     return true;
                 }
             }

@@ -25,9 +25,12 @@ namespace GhCopilot.Gh
 
         public override GH_LoadingInstruction PriorityLoad()
         {
+            StartupDiagnostics.Write("Grasshopper PriorityLoad: registering host bridge.");
+            StartupDiagnostics.WriteEnvironment(typeof(CopilotPriority).Assembly);
             _bridge = new GrasshopperHostBridge();
             CopilotHostRegistry.RegisterGrasshopperBridge(_bridge);
             Instances.CanvasCreated += OnCanvasCreated;
+            StartupDiagnostics.Write("Grasshopper PriorityLoad: host bridge registered.");
             return GH_LoadingInstruction.Proceed;
         }
 

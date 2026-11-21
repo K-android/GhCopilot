@@ -77,7 +77,9 @@ namespace GhCopilot.UI
 
             _statusLabel = new Label
             {
-                Text = "Ready."
+                Text = CopilotHostRegistry.GrasshopperBridge != null
+                    ? "Ready (Grasshopper connected)."
+                    : "Waiting for Grasshopper — open Grasshopper to enable canvas tools."
             };
             _transcriptBox = new TextArea
             {
@@ -144,9 +146,10 @@ namespace GhCopilot.UI
                 SyncTranscriptFromSession();
                 UpdateActionState();
                 if (_statusLabel.Text == "Ready." ||
+                    _statusLabel.Text.StartsWith("Waiting for Grasshopper", StringComparison.Ordinal) ||
                     _statusLabel.Text == "Open Grasshopper first to initialize the .gha bridge.")
                 {
-                    _statusLabel.Text = "Grasshopper connected. Ready.";
+                    _statusLabel.Text = "Ready (Grasshopper connected).";
                 }
             });
         }

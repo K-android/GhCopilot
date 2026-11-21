@@ -12,7 +12,7 @@ namespace GhCopilot.Core.Settings
     public sealed class AppSettings
     {
         public const string DefaultProvider = "Gemini";
-        public const string DefaultModelId = "gemini-3.6-flash";
+        public const string DefaultModelId = "gemini-2.5-flash";
 
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {

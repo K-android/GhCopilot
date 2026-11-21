@@ -532,6 +532,77 @@ namespace GhCopilot.Tests
             }
         }
 
+        [Fact]
+        public async Task GenerateGraphJsonAsync_FallsBackToJsonMode_WhenResponseJsonSchemaRejectedWith400()
+        {
+            int calls = 0;
+            string? secondRequestBody = null;
+            var handler = new StubHttpMessageHandler(async (req, ct) =>
+            {
+                calls++;
+                string body = await req.Content!.ReadAsStringAsync(ct);
+                if (calls == 1)
+                {
+                    Assert.Contains("responseJsonSchema", body);
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                    {
+                        Content = new StringContent("{\"error\":{\"message\":\"Invalid JSON payload received. Unknown name \\\"responseJsonSchema\\\"\"}}", Encoding.UTF8, "application/json")
+                    };
+                }
+
+                secondRequestBody = body;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"{\\\"nodes\\\":[],\\\"wires\\\":[],\\\"explanation\\\":\\\"ok\\\"}\"}]}}]}", Encoding.UTF8, "application/json")
+                };
+            });
+
+            using var http = new HttpClient(handler);
+            using var client = new GeminiClient(http, "https://example.test/v1beta");
+            JsonElement schema = SchemaBuilder.BuildResponseJsonSchema(new[] { new ComponentRecord { ShortId = "c001", Name = "Circle" } });
+
+            string result = await client.GenerateGraphJsonAsync("\"quoted-key\r\n\"", "gemini-2.5-flash", "sys", "usr", schema);
+
+            Assert.Equal(2, calls);
+            Assert.NotNull(secondRequestBody);
+            Assert.DoesNotContain("\"responseJsonSchema\"", secondRequestBody!);
+            Assert.Contains("\"responseMimeType\":\"application/json\"", secondRequestBody!);
+            Assert.Contains("\"explanation\":\"ok\"", result);
+        }
+
+        [Fact]
+        public async Task VerifyConfiguredModelAsync_SuggestsAvailableModels_AndHonorsCustomEndpoint()
+        {
+            string? requestedUrl = null;
+            var handler = new StubHttpMessageHandler((req, _) =>
+            {
+                requestedUrl = req.RequestUri!.ToString();
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"models\":[{\"name\":\"models/gemini-2.5-flash\"},{\"name\":\"models/gemini-2.5-pro\"}]}", Encoding.UTF8, "application/json")
+                });
+            });
+
+            using var http = new HttpClient(handler);
+            using var client = new GeminiClient(http, "https://default.test/v1beta");
+
+            (bool ok, string msg) = await client.VerifyConfiguredModelAsync("test-key", "gemini-nonexistent", default, "Gemini", "https://custom.test/v1beta");
+
+            Assert.False(ok);
+            Assert.Equal("https://custom.test/v1beta/models", requestedUrl);
+            Assert.Contains("Try one of:", msg);
+            Assert.Contains("gemini-2.5-flash", msg);
+        }
+
+        [Fact]
+        public async Task VerifyConfiguredModelAsync_RejectsInvalidKeyCharactersGracefully()
+        {
+            using var client = new GeminiClient();
+            (bool ok, string msg) = await client.VerifyConfiguredModelAsync("bad key with spaces", "gemini-2.5-flash");
+            Assert.False(ok);
+            Assert.Contains("invalid whitespace", msg, StringComparison.OrdinalIgnoreCase);
+        }
+
         private sealed class StubHttpMessageHandler : HttpMessageHandler
         {
             private readonly Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> _responder;
