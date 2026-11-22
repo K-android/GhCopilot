@@ -24,6 +24,12 @@ namespace GhCopilot.Gh.Host
         private GH_Document? _chatDocument;
         public ChatSession Session { get; } = new ChatSession();
         public event Action<int>? TokenEstimateChanged;
+        public event Action<string>? ProgressStageChanged;
+
+        private void ReportStage(string thought)
+        {
+            ProgressStageChanged?.Invoke(thought);
+        }
 
         public void NewChat()
         {
@@ -53,6 +59,44 @@ namespace GhCopilot.Gh.Host
                 if (string.IsNullOrWhiteSpace(prompt) && action == ChatAction.Message)
                     return FailureResponse("Enter a message first. Supply missing inputs, or explicitly enable Use Rhino Selection.");
 
+                if (!TryLoadConfig(out AppSettings settings, out string apiKey, out string? configError))
+                {
+                    if (action != ChatAction.SaveRecipe) return FailureResponse(configError!);
+                    apiKey = string.Empty;
+                    settings = AppSettings.Load();
+                }
+
+                string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
+                bool isConversationalFastPath = action == ChatAction.Message && !useRhinoSelection && ChatPromptBuilder.IsConversationalOnlyPrompt(prompt);
+
+                if (isConversationalFastPath)
+                {
+                    ReportStage("💭 Thinking: conversational message detected — replying without altering canvas...");
+                    CanvasSnapshot readOnlySnapshot = await TryCaptureOptionalSnapshotAsync().ConfigureAwait(false);
+                    string convSystem = ChatPromptBuilder.BuildConversationalSystem();
+                    string convPayload = ChatPromptBuilder.BuildConversationalPayload(Session, readOnlySnapshot, user);
+                    tokens = EstimateSend(convSystem, convPayload, null);
+                    PayloadAuditLogger.LogSentPayload("ChatConversational", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, convSystem, convPayload);
+                    ReportStage($"✉️ Asking {settings.ModelId} for a direct reply...");
+                    string reply = await _geminiClient.GenerateTextAsync(
+                        apiKey,
+                        settings.ModelId,
+                        convSystem,
+                        convPayload,
+                        TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
+                        cancellationToken,
+                        settings.Provider,
+                        endpoint).ConfigureAwait(false);
+                    return FinishChat(user, new CopilotGenerationResponse
+                    {
+                        IsSuccess = true,
+                        Explanation = reply,
+                        StatusLine = "Replied (no canvas changes).",
+                        EstimatedInputTokens = tokens
+                    });
+                }
+
+                ReportStage("🧠 Analyzing prompt & ensuring active Grasshopper document...");
                 IndexStore store = EnsureIndexLoaded();
                 CanvasSnapshot snapshot = await UiThread.MutateActiveDocumentAsync(doc =>
                 {
@@ -77,15 +121,15 @@ namespace GhCopilot.Gh.Host
 
                 if ((action == ChatAction.ExplainSelection || action == ChatAction.FixSelection) && snapshot.Nodes.Count == 0)
                     return FailureResponse("Select Grasshopper components first. Rhino selection is only used as input when explicitly enabled.");
-                if (!TryLoadConfig(out AppSettings settings, out string apiKey, out string? configError))
-                    return FailureResponse(configError!);
 
+                ReportStage("🔍 Retrieving matching Grasshopper components & saved recipes...");
                 IReadOnlyList<ComponentRecord> shortlist = BuildShortlistForFix(store, snapshot, user);
+                ReportStage($"🔧 Hydrating {shortlist.Count} candidate component pins...");
                 await UiThread.MutateActiveDocumentAsync(doc => { EnsureChatDocument(doc); ParamHydrator.HydrateShortlist(shortlist); return true; }).ConfigureAwait(false);
-                string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
 
                 if (action == ChatAction.FixSelection)
                 {
+                    ReportStage("🩺 Inspecting selected input states and runtime errors...");
                     ChatInputState inputs = await UiThread.MutateActiveDocumentAsync(doc =>
                     { EnsureChatDocument(doc); return ChatInputInspector.Inspect(doc, snapshot.SelectedInstanceGuids); }).ConfigureAwait(false);
                     if ((inputs.MissingInputs.Count > 0 || inputs.InvalidInputs.Count > 0) && !useRhinoSelection)
@@ -109,6 +153,7 @@ namespace GhCopilot.Gh.Host
 
                 if (action == ChatAction.ExplainSelection)
                 {
+                    ReportStage($"💭 Thinking: explaining {snapshot.Nodes.Count} node(s) with {settings.ModelId}...");
                     tokens = EstimateSend(system, basePayload, null);
                     PayloadAuditLogger.LogSentPayload("ChatScopedSnapshot", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, system, basePayload);
                     string text = await _geminiClient.GenerateTextAsync(apiKey, settings.ModelId, system, basePayload,
@@ -142,6 +187,7 @@ namespace GhCopilot.Gh.Host
                     });
                 }
 
+                ReportStage("⚡ Applying live preview to Grasshopper canvas & solving...");
                 _previousChatScope.Clear();
                 _previousChatScope.AddRange(Session.LastSpawnedNodeIds);
                 var scope = new List<Guid>(snapshot.SelectedInstanceGuids);
@@ -173,6 +219,7 @@ namespace GhCopilot.Gh.Host
                 while (repairs < 3 && RuntimeRepairPolicy.ShouldRepair(state.MissingInputs, state.InvalidInputs, state.RuntimeMessages))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    ReportStage($"🛠️ Auto-repairing runtime error (attempt {repairs + 1}/3)...");
                     CanvasSnapshot repairSnapshot = await UiThread.MutateActiveDocumentAsync(doc =>
                     {
                         EnsureChatDocument(doc);
@@ -272,7 +319,12 @@ namespace GhCopilot.Gh.Host
             {
                 if (attempt > 0)
                 {
+                    ReportStage($"🔄 Self-correcting validation/schema issue (attempt {attempt + 1}/{RepairLoop.MaxValidatorRetries + 1})...");
                     currentPayload = ChatPromptBuilder.BuildValidationRepairPrompt(basePayload, lastRaw, lastErrors, patchOnly);
+                }
+                else
+                {
+                    ReportStage($"💭 Thinking: designing {(patchOnly ? "incremental graph patch" : "parametric definition")} with {settings.ModelId} ({shortlist.Count} candidates)...");
                 }
 
                 totalTokens += EstimateSend(system, currentPayload, schemaRaw);
@@ -293,6 +345,8 @@ namespace GhCopilot.Gh.Host
                     cancellationToken,
                     settings.Provider,
                     endpoint).ConfigureAwait(false);
+
+                ReportStage("✅ Validating component references, pins, and wire topology...");
 
                 if (patchOnly)
                 {
@@ -367,6 +421,31 @@ namespace GhCopilot.Gh.Host
             }
 
             return map;
+        }
+
+        private Task<CanvasSnapshot> TryCaptureOptionalSnapshotAsync()
+        {
+            var tcs = new TaskCompletionSource<CanvasSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+            UiThread.InvokeOnUi(() =>
+            {
+                try
+                {
+                    GH_Document? doc = Instances.ActiveCanvas?.Document;
+                    if (doc == null)
+                    {
+                        tcs.TrySetResult(new CanvasSnapshot());
+                        return;
+                    }
+
+                    IndexStore store = EnsureIndexLoaded();
+                    tcs.TrySetResult(CaptureChatSnapshot(doc, store));
+                }
+                catch (Exception)
+                {
+                    tcs.TrySetResult(new CanvasSnapshot());
+                }
+            });
+            return tcs.Task;
         }
 
         private CanvasSnapshot CaptureChatSnapshot(GH_Document doc, IndexStore store, IReadOnlyList<Guid>? scope = null, bool selectionFirst = true)

@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using Grasshopper;
+using Grasshopper.GUI.Canvas;
 using Grasshopper.Kernel;
 using Rhino;
 
@@ -25,6 +26,40 @@ namespace GhCopilot.Gh.Canvas
         }
 
         /// <summary>
+        /// Returns the active Grasshopper document, automatically creating and attaching a new blank
+        /// document onto the active canvas when Grasshopper has an initialized DocumentServer but no file open yet.
+        /// Must be called on the Rhino UI thread.
+        /// </summary>
+        public static GH_Document? EnsureActiveDocument()
+        {
+            if (Instances.ActiveCanvas == null)
+            {
+                _ = Instances.DocumentEditor;
+            }
+
+            GH_Canvas? canvas = Instances.ActiveCanvas;
+            if (canvas?.Document != null)
+            {
+                return canvas.Document;
+            }
+
+            GH_DocumentServer? server = Instances.DocumentServer;
+            if (server == null)
+            {
+                return null;
+            }
+
+            GH_Document? doc = server.DocumentCount > 0 ? server[0] : server.AddNewDocument();
+            if (doc != null && canvas != null && canvas.Document == null)
+            {
+                canvas.Document = doc;
+                canvas.Refresh();
+            }
+
+            return canvas?.Document ?? doc;
+        }
+
+        /// <summary>
         /// Safely runs a Grasshopper document mutation on the UI thread when no solution is actively executing.
         /// </summary>
         public static void MutateActiveDocument(Action<GH_Document> mutation, Action<string>? onError = null)
@@ -36,10 +71,10 @@ namespace GhCopilot.Gh.Canvas
 
             InvokeOnUi(() =>
             {
-                GH_Document? doc = Instances.ActiveCanvas?.Document;
+                GH_Document? doc = EnsureActiveDocument();
                 if (doc is null)
                 {
-                    onError?.Invoke("No active Grasshopper document is open.");
+                    onError?.Invoke("No active Grasshopper document is open (open Grasshopper first).");
                     return;
                 }
 
@@ -76,10 +111,10 @@ namespace GhCopilot.Gh.Canvas
             {
                 try
                 {
-                    GH_Document? doc = Instances.ActiveCanvas?.Document;
+                    GH_Document? doc = EnsureActiveDocument();
                     if (doc is null)
                     {
-                        tcs.TrySetException(new InvalidOperationException("No active Grasshopper document is open."));
+                        tcs.TrySetException(new InvalidOperationException("No active Grasshopper document is open (open Grasshopper first)."));
                         return;
                     }
 

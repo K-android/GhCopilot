@@ -11,6 +11,7 @@ namespace GhCopilot.Core.Host
     {
         ChatSession Session { get; }
         event Action<int>? TokenEstimateChanged;
+        event Action<string>? ProgressStageChanged;
         event EventHandler? PreviewStateChanged;
         Task<CopilotGenerationResponse> SendChatAsync(string prompt, ChatAction action = ChatAction.Message,
             bool useRhinoSelection = false, CancellationToken cancellationToken = default);

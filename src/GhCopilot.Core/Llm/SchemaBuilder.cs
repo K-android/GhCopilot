@@ -42,7 +42,7 @@ namespace GhCopilot.Core.Llm
                     nodes = new
                     {
                         type = "array",
-                        description = "Grasshopper nodes to place on the canvas (can be empty if script fallback is used).",
+                        description = "Grasshopper nodes to place on the canvas. MUST be empty [] when answering a greeting, clarification, or conversational question that does not request building geometry, or when script fallback is used.",
                         items = new
                         {
                             type = "object",
@@ -145,7 +145,7 @@ namespace GhCopilot.Core.Llm
                     explanation = new
                     {
                         type = "string",
-                        description = "Brief explanation of what the Grasshopper definition builds."
+                        description = "Your conversational reply to the user, or a brief explanation of what the Grasshopper definition builds."
                     }
                 },
                 required = new[] { "nodes", "wires", "explanation" }

@@ -315,6 +315,43 @@ namespace GhCopilot.Tests
             Assert.Contains("\"nodes\":[],\"wires\":[]", createSystem);
         }
 
+        [Theory]
+        [InlineData("hi", true)]
+        [InlineData("Hello!", true)]
+        [InlineData("hey there", true)]
+        [InlineData("what can you do?", true)]
+        [InlineData("thanks", true)]
+        [InlineData("who are you?", true)]
+        [InlineData("create a circle with a radius slider", false)]
+        [InlineData("change radius to 25", false)]
+        [InlineData("add a panel", false)]
+        [InlineData("extrude the curve", false)]
+        [InlineData("wire n1 to n2", false)]
+        [InlineData("make a twisted tower", false)]
+        public void IsConversationalOnlyPrompt_DistinguishesChatFromCadRequests(string prompt, bool expectedConversational)
+        {
+            Assert.Equal(expectedConversational, ChatPromptBuilder.IsConversationalOnlyPrompt(prompt));
+        }
+
+        [Fact]
+        public void BuildConversationalSystemAndPayload_ProvideLightContextAndRedactGuids()
+        {
+            string sys = ChatPromptBuilder.BuildConversationalSystem();
+            Assert.Contains("plain text", sys, StringComparison.OrdinalIgnoreCase);
+
+            var session = new ChatSession();
+            session.CompleteTurn("hi", "hello!");
+            CanvasSnapshot snap = SampleSnapshot();
+            string payload = ChatPromptBuilder.BuildConversationalPayload(session, snap, "how are you?");
+            Assert.Contains("ACTIVE CANVAS CONTEXT", payload);
+            Assert.Contains("n1: Slider", payload);
+            Assert.EndsWith("NEW USER MESSAGE:" + Environment.NewLine + "how are you?", payload);
+            foreach (CanvasNodeSnapshot n in snap.Nodes)
+            {
+                Assert.DoesNotContain(n.InstanceGuid.ToString(), payload);
+            }
+        }
+
         [Fact]
         public void Builders_RejectInvalidRequiredArguments()
         {

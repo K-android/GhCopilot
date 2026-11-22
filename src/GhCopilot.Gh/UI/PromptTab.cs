@@ -1,25 +1,29 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Eto.Drawing;
 using Eto.Forms;
 using GhCopilot.Core;
 using GhCopilot.Core.Host;
+using GhCopilot.Core.Llm;
+using Rhino;
 
 namespace GhCopilot.UI
 {
     /// <summary>
-    /// Modern dark-themed conversational chat tab with starter chips, quick canvas tools,
-    /// studio composer card, explicit Rhino selection consent, and collapsible diagnostics drawer.
+    /// Messaging-style chat workspace with live AI thoughts/ETA indicator, auto-launched Grasshopper document,
+    /// context-aware starter chips (auto-hidden once conversation begins), and collapsible diagnostics drawer.
     /// </summary>
     internal sealed class PromptTab : Panel
     {
         private const string WelcomePlaceholder =
-            "Welcome to GH Copilot.\n" +
-            "Describe a Grasshopper definition to create, select nodes to explain or fix, " +
-            "or ask follow-up edits in plain English.\n\n" +
-            "Tip: Press Ctrl+Enter to send. Click a starter chip below to try an example.";
+            "Welcome to GH Copilot!\n\n" +
+            "• Chat naturally — ask questions or say hi without altering your canvas.\n" +
+            "• Describe parametric geometry in plain English (e.g. a tower, grid, or circle + slider).\n" +
+            "• Click Send to automatically open a Grasshopper canvas if one isn't active yet.\n\n" +
+            "Tip: Press Ctrl+Enter to send.";
 
         private readonly PreviewBar _previewBar;
         private readonly TextArea _promptBox;
@@ -30,10 +34,15 @@ namespace GhCopilot.UI
         private readonly Button _cancelButton;
         private readonly Button _demoButton;
         private readonly Button _newChatButton;
+        private readonly Panel _starterChipsPanel;
         private readonly Button _chipCircle;
         private readonly Button _chipGrid;
         private readonly Button _chipTower;
         private readonly CheckBox _useRhinoSelection;
+        private readonly Panel _thinkingCard;
+        private readonly Label _thinkingStageLabel;
+        private readonly Label _thinkingTrailLabel;
+        private readonly Label _etaLabel;
         private readonly ProgressBar _progressBar;
         private readonly Label _statusLabel;
         private readonly Label _tokenEstimateLabel;
@@ -41,7 +50,15 @@ namespace GhCopilot.UI
         private readonly Button _diagnosticsToggle;
         private readonly Panel _diagnosticsBody;
         private readonly TextArea _warningsBox;
+
         private CancellationTokenSource? _activeCts;
+        private UITimer? _etaTimer;
+        private readonly Stopwatch _turnStopwatch = new Stopwatch();
+        private double _expectedDurationSeconds = 9.0;
+        private double _emaQuickTurnSeconds = 3.5;
+        private double _emaGraphTurnSeconds = 11.0;
+        private readonly List<string> _thoughtSteps = new List<string>();
+        private string _latestThought = string.Empty;
         private bool _hasTranscriptEntries;
         private bool _diagnosticsExpanded;
 
@@ -54,7 +71,7 @@ namespace GhCopilot.UI
             {
                 ReadOnly = true,
                 Wrap = true,
-                Height = 160,
+                Height = 165,
                 Text = WelcomePlaceholder
             };
             CopilotTheme.StyleTextArea(_transcriptBox);
@@ -76,7 +93,7 @@ namespace GhCopilot.UI
                 Spacing = new Size(6, 4)
             };
             transcriptHeader.BeginHorizontal();
-            transcriptHeader.Add(CopilotTheme.CreateSectionHeader("Conversation"), xscale: true);
+            transcriptHeader.Add(CopilotTheme.CreateSectionHeader("Chat"), xscale: true);
             transcriptHeader.Add(tokenPill, xscale: false);
             transcriptHeader.Add(_newChatButton, xscale: false);
             transcriptHeader.EndHorizontal();
@@ -92,7 +109,53 @@ namespace GhCopilot.UI
             transcriptCardContent.EndVertical();
             Panel transcriptCard = CopilotTheme.CreateCard(transcriptCardContent, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 8);
 
-            // One-click starter prompt chips
+            // Live AI Processing / Thoughts / ETA card (shown only while a turn is running)
+            Panel aiWorkingBadge = CopilotTheme.CreateBadge(
+                out _,
+                "✦ AI THINKING",
+                CopilotTheme.AccentCyanDark,
+                CopilotTheme.AccentCyan);
+
+            _etaLabel = CopilotTheme.CreateLabel(
+                "0.0s • ETA ~9s",
+                CopilotTheme.AccentCyan,
+                CopilotTheme.MonoFont());
+
+            _thinkingStageLabel = CopilotTheme.CreateLabel(
+                "Preparing request...",
+                CopilotTheme.TextPrimary,
+                CopilotTheme.SmallBoldFont());
+
+            _thinkingTrailLabel = CopilotTheme.CreateLabel(
+                "Waiting for model stream...",
+                CopilotTheme.TextSecondary,
+                CopilotTheme.SmallFont());
+
+            _progressBar = new ProgressBar
+            {
+                Indeterminate = true,
+                Visible = true,
+                Height = 5
+            };
+
+            var thinkingHeader = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 2) };
+            thinkingHeader.BeginHorizontal();
+            thinkingHeader.Add(aiWorkingBadge, xscale: false);
+            thinkingHeader.Add(_thinkingStageLabel, xscale: true);
+            thinkingHeader.Add(_etaLabel, xscale: false);
+            thinkingHeader.EndHorizontal();
+
+            var thinkingContent = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(4, 4) };
+            thinkingContent.BeginVertical();
+            thinkingContent.Add(thinkingHeader);
+            thinkingContent.Add(_thinkingTrailLabel);
+            thinkingContent.Add(_progressBar);
+            thinkingContent.EndVertical();
+
+            _thinkingCard = CopilotTheme.CreateCard(thinkingContent, CopilotTheme.AccentCyan, CopilotTheme.SurfaceElevated, padding: 8);
+            _thinkingCard.Visible = false;
+
+            // One-click starter prompt chips (shown only at the very start before user types or sends)
             _chipCircle = CopilotTheme.CreateChipButton("Circle + Slider", "Insert sample prompt: parametric circle with radius slider");
             _chipCircle.Click += (_, __) => PopulatePrompt("Create a circle with an editable radius slider from 1 to 50");
 
@@ -109,6 +172,7 @@ namespace GhCopilot.UI
             chipsRow.Add(_chipGrid, xscale: true);
             chipsRow.Add(_chipTower, xscale: true);
             chipsRow.EndHorizontal();
+            _starterChipsPanel = new Panel { Content = chipsRow };
 
             // Quick canvas action buttons
             _explainButton = CopilotTheme.CreateSecondaryButton("Explain", "Explain the currently selected Grasshopper components");
@@ -130,11 +194,12 @@ namespace GhCopilot.UI
             _promptBox = new TextArea
             {
                 Text = string.Empty,
-                Height = 62,
+                Height = 58,
                 Wrap = true
             };
             CopilotTheme.StyleTextArea(_promptBox);
             _promptBox.KeyDown += OnPromptKeyDown;
+            _promptBox.TextChanged += (_, __) => UpdateStarterChipsVisibility();
 
             _useRhinoSelection = new CheckBox
             {
@@ -144,11 +209,11 @@ namespace GhCopilot.UI
             };
             CopilotTheme.StyleCheckBox(_useRhinoSelection);
 
-            _cancelButton = CopilotTheme.CreateDangerButton("Cancel", "Abort the active request and roll back any pending edits");
+            _cancelButton = CopilotTheme.CreateDangerButton("Stop", "Abort the active request and roll back any pending edits");
             _cancelButton.Enabled = false;
             _cancelButton.Click += OnCancelClicked;
 
-            _sendButton = CopilotTheme.CreatePrimaryButton("Send ↵", "Send message to GH Copilot (Ctrl+Enter)");
+            _sendButton = CopilotTheme.CreatePrimaryButton("Send ➤", "Send message to GH Copilot (Ctrl+Enter)");
             _sendButton.Click += OnSendClicked;
 
             var composerFooter = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
@@ -166,23 +231,16 @@ namespace GhCopilot.UI
             composerContent.EndVertical();
             Panel composerCard = CopilotTheme.CreateCard(composerContent, CopilotTheme.BorderStrong, CopilotTheme.Surface, padding: 8);
 
-            // Progress, status & collapsible diagnostics drawer
-            _progressBar = new ProgressBar
-            {
-                Indeterminate = true,
-                Visible = false,
-                Height = 6
-            };
-
+            // Status & collapsible diagnostics drawer
             _statusLabel = CopilotTheme.CreateLabel(
                 CopilotHostRegistry.GrasshopperBridge != null
                     ? "Ready — Grasshopper connected."
-                    : "Waiting for Grasshopper — open Grasshopper to enable canvas tools.",
+                    : "Ready — Grasshopper opens automatically on Send.",
                 CopilotTheme.TextSecondary,
                 CopilotTheme.SmallFont());
 
             _diagnosticsToggle = CopilotTheme.CreateSecondaryButton("▸ Diagnostics: Clean", "Toggle validator warnings and Grasshopper runtime messages");
-            _diagnosticsToggle.MinimumSize = new Size(120, 22);
+            _diagnosticsToggle.MinimumSize = new Size(124, 22);
             _diagnosticsToggle.Click += OnToggleDiagnostics;
 
             _warningsBox = new TextArea
@@ -216,21 +274,22 @@ namespace GhCopilot.UI
 
             layout.BeginVertical();
             layout.Add(transcriptCard, yscale: true);
-            layout.Add(chipsRow);
+            layout.Add(_thinkingCard);
+            layout.Add(_starterChipsPanel);
             layout.Add(toolsRow);
             layout.Add(composerCard);
-            layout.Add(_progressBar);
             layout.Add(statusBar);
             layout.Add(_diagnosticsBody);
             layout.EndVertical();
             Content = layout;
 
             SyncTranscriptFromSession();
+            UpdateStarterChipsVisibility();
             CopilotHostRegistry.GrasshopperBridgeRegistered += OnBridgeRegistered;
             _previewBar.PreviewActionCompleted += (_, status) =>
             {
                 SetStatus(status, CopilotTheme.AccentEmerald);
-                AppendTranscript("GH Copilot", status);
+                AppendBubble("GH Copilot", status);
                 UpdateActionState();
             };
             _previewBar.PreviewStateChanged += (_, __) => UpdateActionState();
@@ -242,15 +301,23 @@ namespace GhCopilot.UI
             if (disposing)
             {
                 CopilotHostRegistry.GrasshopperBridgeRegistered -= OnBridgeRegistered;
+                StopEtaTimer();
             }
 
             base.Dispose(disposing);
+        }
+
+        private void UpdateStarterChipsVisibility()
+        {
+            bool show = !_hasTranscriptEntries && string.IsNullOrWhiteSpace(_promptBox.Text);
+            _starterChipsPanel.Visible = show;
         }
 
         private void PopulatePrompt(string sample)
         {
             if (!_promptBox.Enabled) return;
             _promptBox.Text = sample;
+            _starterChipsPanel.Visible = false;
             _promptBox.Focus();
             _promptBox.CaretIndex = _promptBox.Text.Length;
         }
@@ -300,14 +367,72 @@ namespace GhCopilot.UI
             _statusLabel.TextColor = color ?? CopilotTheme.TextSecondary;
         }
 
+        private void StartEtaTimer(bool isQuickTurn)
+        {
+            StopEtaTimer();
+            _thoughtSteps.Clear();
+            _latestThought = string.Empty;
+            _expectedDurationSeconds = isQuickTurn ? _emaQuickTurnSeconds : _emaGraphTurnSeconds;
+            _turnStopwatch.Restart();
+            UpdateThinkingDisplay(isQuickTurn
+                ? "💭 Reading message context..."
+                : "🧠 Analyzing prompt & preparing Grasshopper workspace...");
+
+            _etaTimer = new UITimer { Interval = 0.25 };
+            _etaTimer.Elapsed += (_, __) => UpdateEtaTick();
+            _etaTimer.Start();
+            _thinkingCard.Visible = true;
+        }
+
+        private void StopEtaTimer()
+        {
+            _turnStopwatch.Stop();
+            if (_etaTimer != null)
+            {
+                _etaTimer.Stop();
+                _etaTimer.Dispose();
+                _etaTimer = null;
+            }
+            _thinkingCard.Visible = false;
+        }
+
+        private void UpdateEtaTick()
+        {
+            double elapsed = _turnStopwatch.Elapsed.TotalSeconds;
+            double remaining = Math.Max(0.5, _expectedDurationSeconds - elapsed);
+            _etaLabel.Text = elapsed < _expectedDurationSeconds
+                ? $"{elapsed:F1}s • ETA ~{remaining:F0}s"
+                : $"{elapsed:F1}s • Finalizing...";
+        }
+
+        private void UpdateThinkingDisplay(string stage)
+        {
+            if (string.IsNullOrWhiteSpace(stage)) return;
+            _latestThought = stage;
+            if (_thoughtSteps.Count == 0 || !string.Equals(_thoughtSteps[_thoughtSteps.Count - 1], stage, StringComparison.Ordinal))
+            {
+                if (_thoughtSteps.Count >= 4) _thoughtSteps.RemoveAt(0);
+                _thoughtSteps.Add(stage);
+            }
+
+            _thinkingStageLabel.Text = stage;
+            _thinkingStageLabel.ToolTip = stage;
+            _thinkingTrailLabel.Text = _thoughtSteps.Count > 1
+                ? "Steps: " + string.Join("  →  ", _thoughtSteps)
+                : "Live reasoning pipeline active...";
+            _thinkingTrailLabel.ToolTip = _thinkingTrailLabel.Text;
+            UpdateEtaTick();
+        }
+
         private void OnBridgeRegistered(object? sender, EventArgs e)
         {
             Application.Instance?.AsyncInvoke(() =>
             {
                 SyncTranscriptFromSession();
+                UpdateStarterChipsVisibility();
                 UpdateActionState();
-                if (_statusLabel.Text.StartsWith("Waiting for Grasshopper", StringComparison.Ordinal) ||
-                    _statusLabel.Text == "Open Grasshopper first to initialize the .gha bridge.")
+                if (_statusLabel.Text.StartsWith("Ready", StringComparison.Ordinal) ||
+                    _statusLabel.Text.StartsWith("Waiting for Grasshopper", StringComparison.Ordinal))
                 {
                     SetStatus("Ready — Grasshopper connected.", CopilotTheme.AccentEmerald);
                 }
@@ -323,13 +448,57 @@ namespace GhCopilot.UI
 
             if (CopilotHostRegistry.GrasshopperBridge is IChatHostBridge chat)
             {
-                if (!string.IsNullOrEmpty(chat.Session.Summary)) AppendTranscript("Context", chat.Session.Summary);
+                if (!string.IsNullOrEmpty(chat.Session.Summary))
+                {
+                    AppendBubble("Context", chat.Session.Summary);
+                }
+
                 foreach (var message in chat.Session.Messages)
                 {
-                    string displayRole = string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase) ? "You" : "GH Copilot";
-                    AppendTranscript(displayRole, message.Content);
+                    bool isUser = string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase);
+                    AppendBubble(isUser ? "You" : "GH Copilot", message.Content);
                 }
             }
+        }
+
+        private async Task<IGrasshopperHostBridge?> EnsureGrasshopperLoadedAsync()
+        {
+            if (CopilotHostRegistry.GrasshopperBridge != null)
+            {
+                return CopilotHostRegistry.GrasshopperBridge;
+            }
+
+            SetStatus("Opening Grasshopper workspace...", CopilotTheme.AccentCyan);
+            try
+            {
+                RhinoApp.InvokeOnUiThread((Action)(() =>
+                {
+                    try
+                    {
+                        RhinoApp.RunScript("_-Grasshopper _Window _Show _Enter", false);
+                    }
+                    catch (Exception)
+                    {
+                        // Ignore if running in headless test harness without Rhino command host.
+                    }
+                }));
+            }
+            catch (Exception)
+            {
+                // Ignore if RhinoApp host is unavailable outside Rhino.
+            }
+
+            for (int i = 0; i < 20; i++)
+            {
+                if (CopilotHostRegistry.GrasshopperBridge != null)
+                {
+                    return CopilotHostRegistry.GrasshopperBridge;
+                }
+
+                await Task.Delay(150).ConfigureAwait(true);
+            }
+
+            return CopilotHostRegistry.GrasshopperBridge;
         }
 
         private bool CanStartAction()
@@ -344,26 +513,28 @@ namespace GhCopilot.UI
             return true;
         }
 
-        private Task RunBridgeActionAsync(string prompt, ChatAction action, string busyMessage)
+        private async Task RunBridgeActionAsync(string prompt, ChatAction action, string busyMessage)
         {
-            if (!CanStartAction()) return Task.CompletedTask;
-            IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
+            if (!CanStartAction()) return;
+
+            IGrasshopperHostBridge? bridge = await EnsureGrasshopperLoadedAsync().ConfigureAwait(true);
             if (bridge is null)
             {
-                const string missing = "Open Grasshopper first to initialize the .gha bridge.";
+                const string missing = "Could not start Grasshopper automatically. Please open Grasshopper from Rhino and try again.";
                 SetStatus(missing, CopilotTheme.WarningAmber);
-                AppendTranscript("GH Copilot", missing);
+                AppendBubble("GH Copilot", missing);
                 MessageBox.Show(this, missing, PluginConstants.ProductName, MessageBoxType.Warning);
-                return Task.CompletedTask;
+                return;
             }
 
             bool useRhinoSelection = _useRhinoSelection.Checked == true;
             if (useRhinoSelection && !(bridge is IChatHostBridge))
             {
                 SetStatus("This host does not support explicit Rhino selection. Uncheck Use Rhino Selection to continue.", CopilotTheme.WarningAmber);
-                return Task.CompletedTask;
+                return;
             }
-            return ExecuteAsync(bridge, prompt, action, useRhinoSelection, busyMessage);
+
+            await ExecuteAsync(bridge, prompt, action, useRhinoSelection, busyMessage).ConfigureAwait(true);
         }
 
         private async Task ExecuteAsync(
@@ -376,14 +547,35 @@ namespace GhCopilot.UI
             var cts = new CancellationTokenSource();
             _activeCts = cts;
             IChatHostBridge? chat = bridge as IChatHostBridge;
+            bool isQuickTurn = action == ChatAction.ExplainSelection ||
+                               action == ChatAction.SaveRecipe ||
+                               (action == ChatAction.Message && !useRhinoSelection && ChatPromptBuilder.IsConversationalOnlyPrompt(prompt));
+
             Action<int> onEstimate = estimate => Application.Instance?.AsyncInvoke(() =>
             {
                 if (ReferenceEquals(_activeCts, cts)) ShowTokenEstimate(estimate);
             });
-            if (chat != null) chat.TokenEstimateChanged += onEstimate;
+            Action<string> onStage = stage => Application.Instance?.AsyncInvoke(() =>
+            {
+                if (ReferenceEquals(_activeCts, cts))
+                {
+                    UpdateThinkingDisplay(stage);
+                    SetStatus(stage, CopilotTheme.AccentCyan);
+                }
+            });
+
+            if (chat != null)
+            {
+                chat.TokenEstimateChanged += onEstimate;
+                chat.ProgressStageChanged += onStage;
+            }
+
             SetRunningState(isRunning: true, statusText: busyMessage);
+            StartEtaTimer(isQuickTurn);
             _tokenEstimateLabel.Text = "~… tok";
-            AppendTranscript("You", (action == ChatAction.Message ? "" : "[" + action + "] ")
+            _starterChipsPanel.Visible = false;
+
+            AppendBubble("You", (action == ChatAction.Message ? "" : "[" + action + "] ")
                 + prompt + (useRhinoSelection ? " [Use Rhino Selection]" : ""));
             UpdateDiagnosticsDisplay(new List<string>());
 
@@ -426,16 +618,35 @@ namespace GhCopilot.UI
             }
             finally
             {
-                if (chat != null) chat.TokenEstimateChanged -= onEstimate;
+                if (chat != null)
+                {
+                    chat.TokenEstimateChanged -= onEstimate;
+                    chat.ProgressStageChanged -= onStage;
+                }
+
+                double elapsedSeconds = _turnStopwatch.Elapsed.TotalSeconds;
+                string thoughtSummary = _latestThought;
+
                 Application.Instance?.AsyncInvoke(() =>
                 {
                     try
                     {
                         if (response != null)
                         {
+                            if (response.IsSuccess)
+                            {
+                                if (isQuickTurn) _emaQuickTurnSeconds = Math.Max(1.0, 0.6 * _emaQuickTurnSeconds + 0.4 * elapsedSeconds);
+                                else _emaGraphTurnSeconds = Math.Max(2.0, 0.6 * _emaGraphTurnSeconds + 0.4 * elapsedSeconds);
+                            }
+
                             SetStatus(response.StatusLine, response.IsSuccess ? CopilotTheme.AccentEmerald : CopilotTheme.DangerRose);
                             string answer = string.IsNullOrWhiteSpace(response.Explanation) ? response.StatusLine : response.Explanation;
-                            AppendTranscript("GH Copilot", (response.IsSuccess ? "" : "[Error] ") + answer);
+                            AppendBubble(
+                                "GH Copilot",
+                                (response.IsSuccess ? "" : "[Error] ") + answer,
+                                thoughtSummary,
+                                elapsedSeconds);
+
                             var combinedMessages = new List<string>();
                             foreach (string warning in response.ValidatorWarnings) combinedMessages.Add("[Validator] " + warning);
                             combinedMessages.AddRange(response.RuntimeMessages);
@@ -451,16 +662,18 @@ namespace GhCopilot.UI
                         {
                             string msg = failure ?? "No response returned.";
                             SetStatus(msg, CopilotTheme.DangerRose);
-                            AppendTranscript("GH Copilot", msg);
+                            AppendBubble("GH Copilot", msg, thoughtSummary, elapsedSeconds);
                             _tokenEstimateLabel.Text = "~— tok";
                         }
                     }
                     finally
                     {
+                        StopEtaTimer();
                         _useRhinoSelection.Checked = false;
                         _activeCts = null;
                         cts.Dispose();
                         SetRunningState(isRunning: false);
+                        UpdateStarterChipsVisibility();
                     }
                 });
             }
@@ -483,59 +696,65 @@ namespace GhCopilot.UI
             string prompt = _promptBox.Text?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(prompt))
             {
-                SetStatus("Enter a message or click a starter chip first.", CopilotTheme.WarningAmber);
+                SetStatus("Enter a message or pick a starter chip first.", CopilotTheme.WarningAmber);
                 return;
             }
 
             await RunBridgeActionAsync(
-                prompt, ChatAction.Message, "Retrieving components and calling LLM...");
+                prompt, ChatAction.Message, "Processing your message...");
         }
 
         private async void OnExplainClicked(object? sender, EventArgs e)
         {
             string hint = _promptBox.Text?.Trim() ?? string.Empty;
             await RunBridgeActionAsync(
-                hint, ChatAction.ExplainSelection, "Serializing selection and asking LLM to explain...");
+                hint, ChatAction.ExplainSelection, "Inspecting selection and asking LLM to explain...");
         }
 
         private async void OnFixClicked(object? sender, EventArgs e)
         {
             string hint = _promptBox.Text?.Trim() ?? string.Empty;
             await RunBridgeActionAsync(
-                hint, ChatAction.FixSelection, "Serializing selection and generating fix preview...");
+                hint, ChatAction.FixSelection, "Inspecting selection and generating fix preview...");
         }
 
         private void OnCancelClicked(object? sender, EventArgs e)
         {
+            SetStatus("Cancelling request...", CopilotTheme.WarningAmber);
             _activeCts?.Cancel();
         }
 
-        private void OnDemoClicked(object? sender, EventArgs e)
+        private async void OnDemoClicked(object? sender, EventArgs e)
         {
             if (!CanStartAction()) return;
-            IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
+            IGrasshopperHostBridge? bridge = await EnsureGrasshopperLoadedAsync().ConfigureAwait(true);
             if (bridge is null)
             {
-                const string missing = "Open Grasshopper first to initialize the .gha bridge.";
+                const string missing = "Could not start Grasshopper automatically. Please open Grasshopper from Rhino and try again.";
                 SetStatus(missing, CopilotTheme.WarningAmber);
                 MessageBox.Show(this, missing, PluginConstants.ProductName, MessageBoxType.Warning);
                 return;
             }
 
-            AppendTranscript("You", "Spawn Demo (No LLM)");
+            _starterChipsPanel.Visible = false;
+            AppendBubble("You", "Spawn Demo (No LLM)");
             try
             {
                 string status = bridge.SpawnDemoGraph();
                 SetStatus(status, CopilotTheme.AccentEmerald);
-                AppendTranscript("GH Copilot", status + Environment.NewLine + "Slider(12.5) + Slider(7.5) -> Addition -> Panel.");
+                AppendBubble("GH Copilot", status + Environment.NewLine + "Slider(12.5) + Slider(7.5) -> Addition -> Panel.");
                 UpdateDiagnosticsDisplay(new List<string>());
             }
             catch (Exception ex)
             {
                 SetStatus("Error: " + ex.Message, CopilotTheme.DangerRose);
-                AppendTranscript("GH Copilot", "Error: " + ex.Message);
+                AppendBubble("GH Copilot", "Error: " + ex.Message);
             }
-            finally { _previewBar.RefreshState(); }
+            finally
+            {
+                _previewBar.RefreshState();
+                UpdateStarterChipsVisibility();
+            }
         }
 
         private async void OnSaveRecipeClicked(object? sender, EventArgs e)
@@ -558,30 +777,53 @@ namespace GhCopilot.UI
                 _tokenEstimateLabel.Text = "~0 tok";
                 UpdateDiagnosticsDisplay(new List<string>());
                 SetDiagnosticsExpanded(false);
-                SetStatus("New chat started. Accepted canvas objects are unchanged.", CopilotTheme.AccentCyan);
+                UpdateStarterChipsVisibility();
+                SetStatus("New chat ready. Accepted canvas objects are unchanged.", CopilotTheme.AccentCyan);
             }
             catch (Exception ex)
             {
                 SetStatus("Error: " + ex.Message, CopilotTheme.DangerRose);
-                AppendTranscript("GH Copilot", "Error: " + ex.Message);
+                AppendBubble("GH Copilot", "Error: " + ex.Message);
             }
         }
 
-        private void AppendTranscript(string role, string content)
+        private void AppendBubble(string role, string content, string? thought = null, double? elapsedSeconds = null)
         {
-            string header = $"── {role} ──────────────────────────";
-            string entry = header + Environment.NewLine + content;
+            string timestamp = DateTime.Now.ToString("HH:mm");
+            string title = role == "You"
+                ? $"┌─ You  •  {timestamp} ──────────────────────────"
+                : elapsedSeconds.HasValue && elapsedSeconds.Value > 0
+                    ? $"┌─ ✦ {role}  •  {timestamp} ({elapsedSeconds.Value:F1}s) ──────────"
+                    : $"┌─ ✦ {role}  •  {timestamp} ──────────────────";
+
+            var lines = new List<string> { title };
+            if (!string.IsNullOrWhiteSpace(thought))
+            {
+                lines.Add($"│ {thought}");
+                lines.Add("│");
+            }
+
+            string normalized = (content ?? string.Empty).Replace("\r\n", "\n");
+            foreach (string line in normalized.Split('\n'))
+            {
+                lines.Add($"│ {line}");
+            }
+
+            lines.Add("└───────────────────────────────────────────");
+            string bubble = string.Join(Environment.NewLine, lines);
+
             if (!_hasTranscriptEntries)
             {
                 _hasTranscriptEntries = true;
                 _transcriptBox.TextColor = CopilotTheme.TextPrimary;
-                _transcriptBox.Text = entry;
+                _transcriptBox.Text = bubble;
             }
             else
             {
-                _transcriptBox.Text = (_transcriptBox.Text ?? string.Empty) + Environment.NewLine + Environment.NewLine + entry;
+                _transcriptBox.Text = (_transcriptBox.Text ?? string.Empty) + Environment.NewLine + Environment.NewLine + bubble;
             }
 
+            _starterChipsPanel.Visible = false;
             _transcriptBox.CaretIndex = _transcriptBox.Text.Length;
         }
 
@@ -612,7 +854,6 @@ namespace GhCopilot.UI
             UpdateActionState();
             _previewBar.SetBusy(isRunning);
             _cancelButton.Enabled = isRunning;
-            _progressBar.Visible = isRunning;
             if (statusText != null)
             {
                 SetStatus(statusText, CopilotTheme.AccentCyan);
