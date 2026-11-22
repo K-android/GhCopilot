@@ -31,7 +31,7 @@ namespace GhCopilot.Rhino.Commands
                 Panels.OpenPanel(typeof(CopilotDockPanel).GUID);
                 // Opening a UI must not query a still-initializing Grasshopper component server.
                 // The detailed host report remains available through the Grasshopper menu.
-                RhinoApp.WriteLine("GH Copilot panel opened. Open Grasshopper before sending a request.");
+                RhinoApp.WriteLine("GH Copilot panel opened (Rhino Direct ready; open Grasshopper anytime for parametric definitions).");
                 StartupDiagnostics.Write("GhCopilot command: dock panel open completed.");
                 return Result.Success;
             }

@@ -120,6 +120,8 @@ namespace GhCopilot.Installer
             string packageRoot = GetYakPackageRoot();
             string installDir = GetYakVersionDir();
 
+            EnsureNoLockedFiles(packageRoot);
+
             if (Directory.Exists(packageRoot))
             {
                 Directory.Delete(packageRoot, recursive: true);
@@ -163,6 +165,11 @@ namespace GhCopilot.Installer
                 }
             }
 
+            // Write Yak's active version pointer (manifest.txt) expected by Rhino 8 PackageManager.
+            string manifestTxtPath = Path.Combine(packageRoot, "manifest.txt");
+            File.WriteAllText(manifestTxtPath, Version + Environment.NewLine, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            ClearMarkOfTheWeb(manifestTxtPath);
+
             // Remove legacy Grasshopper\Libraries\GhCopilot folder to prevent duplicate GH_AssemblyInfo ID warnings.
             string legacyDir = GetLegacyGhLibrariesDir();
             if (Directory.Exists(legacyDir))
@@ -170,7 +177,7 @@ namespace GhCopilot.Installer
                 Directory.Delete(legacyDir, recursive: true);
             }
 
-            // Register Rhino 8 PlugIn in HKCU so Rhino loads GhCopilot.Rhino.rhp automatically on startup.
+            // Register Rhino 8 PlugIn in HKCU matching Rhino 8's native .NET plug-in schema (root + PlugIn + CommandList).
             string runtimeFolder = string.Equals(preferredRuntime, "net7.0", StringComparison.OrdinalIgnoreCase)
                 ? "net7.0"
                 : (string.Equals(preferredRuntime, "net48", StringComparison.OrdinalIgnoreCase)
@@ -183,11 +190,30 @@ namespace GhCopilot.Installer
                 rhpPath = Path.Combine(installDir, "net48", "GhCopilot.Rhino.rhp");
             }
 
-            string regPath = $@"Software\McNeel\Rhinoceros\8.0\Plug-Ins\{RhinoPlugInId}";
+            string regPath = $@"Software\McNeel\Rhinoceros\8.0\Plug-Ins\{RhinoPlugInId.ToLowerInvariant()}";
+            Registry.CurrentUser.DeleteSubKeyTree(regPath, throwOnMissingSubKey: false);
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(regPath))
             {
                 key.SetValue("Name", "GH Copilot", RegistryValueKind.String);
+                key.SetValue("EnglishName", "GH Copilot", RegistryValueKind.String);
+                key.SetValue("Description", "AI copilot for Grasshopper and Rhino 8.", RegistryValueKind.String);
+                key.SetValue("Organization", "GH Copilot", RegistryValueKind.String);
                 key.SetValue("FileName", rhpPath, RegistryValueKind.String);
+                key.SetValue("LoadMode", 1, RegistryValueKind.DWord);
+                key.SetValue("Type", 16, RegistryValueKind.DWord);
+                key.SetValue("IsDotNETPlugIn", 1, RegistryValueKind.DWord);
+                key.SetValue("AddToHelpMenu", 0, RegistryValueKind.DWord);
+                key.SetValue("DirectoryInstall", 1, RegistryValueKind.DWord);
+
+                using (RegistryKey pluginSubKey = key.CreateSubKey("PlugIn"))
+                {
+                    pluginSubKey.SetValue("FileName", rhpPath, RegistryValueKind.String);
+                }
+
+                using (RegistryKey commandListSubKey = key.CreateSubKey("CommandList"))
+                {
+                    commandListSubKey.SetValue("GhCopilot", "2;GhCopilot", RegistryValueKind.String);
+                }
             }
 
             // Save optional pre-configuration (settings.json and DPAPI-encrypted API key).
@@ -195,12 +221,13 @@ namespace GhCopilot.Installer
 
             return $"Installed GH Copilot v{Version} to:\r\n{installDir}\r\n\r\n" +
                    $"Registered Rhino 8 PlugIn:\r\n{rhpPath}\r\n\r\n" +
-                   "Open Rhino 8 and Grasshopper — GH Copilot will load automatically.";
+                   "Open Rhino 8 and run 'GhCopilot' — Direct Rhino & Grasshopper tools will load automatically.";
         }
 
         internal static string UninstallCore()
         {
             string packageRoot = GetYakPackageRoot();
+            EnsureNoLockedFiles(packageRoot);
             if (Directory.Exists(packageRoot))
             {
                 Directory.Delete(packageRoot, recursive: true);
@@ -212,10 +239,32 @@ namespace GhCopilot.Installer
                 Directory.Delete(legacyDir, recursive: true);
             }
 
-            string regPath = $@"Software\McNeel\Rhinoceros\8.0\Plug-Ins\{RhinoPlugInId}";
+            string regPath = $@"Software\McNeel\Rhinoceros\8.0\Plug-Ins\{RhinoPlugInId.ToLowerInvariant()}";
             Registry.CurrentUser.DeleteSubKeyTree(regPath, throwOnMissingSubKey: false);
 
             return "Uninstalled GH Copilot plugin files and Rhino 8 registration.";
+        }
+
+        private static void EnsureNoLockedFiles(string directoryPath)
+        {
+            if (!Directory.Exists(directoryPath))
+            {
+                return;
+            }
+
+            foreach (string filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    using var fs = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    throw new InvalidOperationException(
+                        $"Rhino 8 appears to be holding GH Copilot files open ({Path.GetFileName(filePath)}). Close Rhino 8 completely and run Setup again.",
+                        ex);
+                }
+            }
         }
 
         private static void SaveOptionalConfiguration(string? apiKey, string? modelId, string? sharedFolder)

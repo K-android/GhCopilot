@@ -20,16 +20,26 @@ namespace GhCopilot.Rhino
 
         public static GhCopilotRhinoPlugIn? Instance { get; private set; }
 
+        public override PlugInLoadTime LoadTime => PlugInLoadTime.AtStartup;
+
         protected override LoadReturnCode OnLoad(ref string errorMessage)
         {
             StartupDiagnostics.Write("Rhino plug-in OnLoad started.");
             try
             {
                 StartupDiagnostics.WriteEnvironment(GetType().Assembly);
-                if (CopilotHostRegistry.RhinoBridge is null)
+                try
                 {
-                    CopilotHostRegistry.RegisterRhinoBridge(new Host.RhinoHostBridge());
+                    if (CopilotHostRegistry.RhinoBridge is null)
+                    {
+                        CopilotHostRegistry.RegisterRhinoBridge(new Host.RhinoHostBridge());
+                    }
                 }
+                catch (Exception bridgeEx)
+                {
+                    StartupDiagnostics.Write("Rhino direct bridge initialization warning (panel will still register).", bridgeEx);
+                }
+
                 Panels.RegisterPanel(
                     this,
                     typeof(CopilotDockPanel),
