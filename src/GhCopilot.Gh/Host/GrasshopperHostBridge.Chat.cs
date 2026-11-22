@@ -71,10 +71,11 @@ namespace GhCopilot.Gh.Host
 
                 if (isConversationalFastPath)
                 {
-                    ReportStage("💭 Thinking: conversational message detected — replying without altering canvas...");
-                    CanvasSnapshot readOnlySnapshot = await TryCaptureOptionalSnapshotAsync().ConfigureAwait(false);
+                    ReportStage("💭 Thinking: inspecting workspace & replying directly...");
+                    (CanvasSnapshot readOnlySnapshot, RhinoViewportSnapshot viewportContext) =
+                        await TryCaptureOptionalSnapshotAsync().ConfigureAwait(false);
                     string convSystem = ChatPromptBuilder.BuildConversationalSystem();
-                    string convPayload = ChatPromptBuilder.BuildConversationalPayload(Session, readOnlySnapshot, user);
+                    string convPayload = ChatPromptBuilder.BuildConversationalPayload(Session, readOnlySnapshot, user, viewportContext);
                     tokens = EstimateSend(convSystem, convPayload, null);
                     PayloadAuditLogger.LogSentPayload("ChatConversational", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, convSystem, convPayload);
                     ReportStage($"✉️ Asking {settings.ModelId} for a direct reply...");
@@ -96,9 +97,12 @@ namespace GhCopilot.Gh.Host
                     });
                 }
 
-                ReportStage("🧠 Analyzing prompt & ensuring active Grasshopper document...");
+                ReportStage("🔭 Inspecting Rhino viewport & active Grasshopper definition...");
+                bool forceWholeCanvas = ChatPromptBuilder.RequestsWholeCanvasInspection(prompt);
+                IReadOnlyList<Guid>? explicitFallback = forceWholeCanvas ? Array.Empty<Guid>() : null;
+                bool selectionFirst = !forceWholeCanvas;
                 IndexStore store = EnsureIndexLoaded();
-                CanvasSnapshot snapshot = await UiThread.MutateActiveDocumentAsync(doc =>
+                (CanvasSnapshot snapshot, RhinoViewportSnapshot viewportSnapshot) = await UiThread.MutateActiveDocumentAsync(doc =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (_chatDocument != null && !ReferenceEquals(_chatDocument, doc))
@@ -106,12 +110,14 @@ namespace GhCopilot.Gh.Host
                     _chatDocument = doc;
                     Session.SpawnedNodeIds.RemoveWhere(id => doc.FindObject(id, false) == null);
                     Session.LastSpawnedNodeIds.RemoveAll(id => doc.FindObject(id, false) == null);
-                    return CaptureChatSnapshot(doc, store);
+                    return (
+                        CaptureChatSnapshot(doc, store, explicitFallback, selectionFirst: selectionFirst, fallbackToAllCanvasObjects: true),
+                        RhinoViewportInspector.InspectActiveDoc());
                 }).ConfigureAwait(false);
 
                 if (action == ChatAction.SaveRecipe)
                 {
-                    if (snapshot.Nodes.Count == 0) return FailureResponse("Select a subgraph to save, or create one in this chat first.");
+                    if (snapshot.Nodes.Count == 0) return FailureResponse("Select a subgraph to save, or open a definition first.");
                     string name = string.IsNullOrWhiteSpace(prompt) ? "Chat recipe" : prompt.Substring(0, Math.Min(48, prompt.Length));
                     RecipeRecord recipe = RecipeStore.CreateFromCanvasSnapshot(name, prompt, snapshot);
                     if (recipe.Spec.Nodes.Count == 0) return FailureResponse("The selected nodes are not indexed and cannot be saved as a recipe.");
@@ -119,8 +125,12 @@ namespace GhCopilot.Gh.Host
                     return new CopilotGenerationResponse { IsSuccess = true, StatusLine = $"Saved recipe '{name}'.", Explanation = $"Saved recipe '{name}' ({recipe.Spec.Nodes.Count} node(s), {recipe.Spec.Wires.Count} wire(s))." };
                 }
 
-                if ((action == ChatAction.ExplainSelection || action == ChatAction.FixSelection) && snapshot.Nodes.Count == 0)
-                    return FailureResponse("Select Grasshopper components first. Rhino selection is only used as input when explicitly enabled.");
+                if (action == ChatAction.FixSelection && snapshot.Nodes.Count == 0)
+                    return FailureResponse("No Grasshopper components found on canvas to fix.");
+                if (action == ChatAction.ExplainSelection &&
+                    snapshot.Nodes.Count == 0 &&
+                    (!viewportSnapshot.HasActiveDocument || viewportSnapshot.TotalVisibleObjects == 0))
+                    return FailureResponse("No Grasshopper components or visible Rhino viewport objects found to explain.");
 
                 ReportStage("🔍 Retrieving matching Grasshopper components & saved recipes...");
                 IReadOnlyList<ComponentRecord> shortlist = BuildShortlistForFix(store, snapshot, user);
@@ -149,16 +159,24 @@ namespace GhCopilot.Gh.Host
                     : ChatPromptBuilder.BuildSystem(shortlist, patchOnly);
                 system += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
                 JsonElement schema = patchOnly ? GraphPatchSchema.Build() : SchemaBuilder.BuildResponseJsonSchema(shortlist);
-                string basePayload = ChatPromptBuilder.Build(Session, snapshot, null, user, shortlist, matchingRecipes);
+                string basePayload = ChatPromptBuilder.Build(Session, snapshot, null, user, shortlist, matchingRecipes, viewportSnapshot);
 
                 if (action == ChatAction.ExplainSelection)
                 {
-                    ReportStage($"💭 Thinking: explaining {snapshot.Nodes.Count} node(s) with {settings.ModelId}...");
+                    ReportStage(snapshot.Nodes.Count > 0
+                        ? $"💭 Thinking: explaining {snapshot.Nodes.Count} component(s) & Rhino scene with {settings.ModelId}..."
+                        : $"💭 Thinking: explaining Rhino viewport scene with {settings.ModelId}...");
                     tokens = EstimateSend(system, basePayload, null);
                     PayloadAuditLogger.LogSentPayload("ChatScopedSnapshot", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, system, basePayload);
                     string text = await _geminiClient.GenerateTextAsync(apiKey, settings.ModelId, system, basePayload,
                         TimeSpan.FromSeconds(settings.RequestTimeoutSeconds), cancellationToken, settings.Provider, endpoint).ConfigureAwait(false);
-                    return FinishChat(user, new CopilotGenerationResponse { IsSuccess = true, Explanation = text, StatusLine = "Selection explained.", EstimatedInputTokens = tokens });
+                    return FinishChat(user, new CopilotGenerationResponse
+                    {
+                        IsSuccess = true,
+                        Explanation = text,
+                        StatusLine = snapshot.Nodes.Count > 0 ? "Definition & viewport explained." : "Rhino viewport explained.",
+                        EstimatedInputTokens = tokens
+                    });
                 }
 
                 (bool validOutput, GraphPatch? patch, GraphSpec? graph, string explanation, List<string> validationErrors, int initialTokens) =
@@ -195,7 +213,7 @@ namespace GhCopilot.Gh.Host
                 {
                     EnsureChatDocument(doc);
                     cancellationToken.ThrowIfCancellationRequested();
-                    CanvasSnapshot current = CaptureChatSnapshot(doc, store);
+                    CanvasSnapshot current = CaptureChatSnapshot(doc, store, explicitFallback, selectionFirst: selectionFirst, fallbackToAllCanvasObjects: true);
                     EnsureUnchanged(snapshot, current);
                     transaction = new ChatTurnTransaction(doc);
                     if (graph != null) transaction.ApplyGraph(graph, snapshot, id => ResolveChatProxy(store, id));
@@ -423,39 +441,53 @@ namespace GhCopilot.Gh.Host
             return map;
         }
 
-        private Task<CanvasSnapshot> TryCaptureOptionalSnapshotAsync()
+        private Task<(CanvasSnapshot Canvas, RhinoViewportSnapshot Viewport)> TryCaptureOptionalSnapshotAsync()
         {
-            var tcs = new TaskCompletionSource<CanvasSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<(CanvasSnapshot, RhinoViewportSnapshot)>(TaskCreationOptions.RunContinuationsAsynchronously);
             UiThread.InvokeOnUi(() =>
             {
+                RhinoViewportSnapshot viewport = RhinoViewportInspector.InspectActiveDoc();
                 try
                 {
                     GH_Document? doc = Instances.ActiveCanvas?.Document;
                     if (doc == null)
                     {
-                        tcs.TrySetResult(new CanvasSnapshot());
+                        tcs.TrySetResult((new CanvasSnapshot(), viewport));
                         return;
                     }
 
                     IndexStore store = EnsureIndexLoaded();
-                    tcs.TrySetResult(CaptureChatSnapshot(doc, store));
+                    tcs.TrySetResult((CaptureChatSnapshot(doc, store, fallbackToAllCanvasObjects: true), viewport));
                 }
                 catch (Exception)
                 {
-                    tcs.TrySetResult(new CanvasSnapshot());
+                    tcs.TrySetResult((new CanvasSnapshot(), viewport));
                 }
             });
             return tcs.Task;
         }
 
-        private CanvasSnapshot CaptureChatSnapshot(GH_Document doc, IndexStore store, IReadOnlyList<Guid>? scope = null, bool selectionFirst = true)
+        private CanvasSnapshot CaptureChatSnapshot(
+            GH_Document doc,
+            IndexStore store,
+            IReadOnlyList<Guid>? scope = null,
+            bool selectionFirst = true,
+            bool fallbackToAllCanvasObjects = true)
         {
             if (!selectionFirst)
             {
                 // Explicit IDs avoid changing the user's selection or widening the repair scope.
                 return CanvasSerializer.SerializeObjects(doc, store, scope ?? Array.Empty<Guid>(), Session.GetNodeId);
             }
-            return CanvasSerializer.SerializeSelection(doc, store, false, scope ?? Session.LastSpawnedNodeIds, Session.GetNodeId);
+
+            return CanvasSerializer.SerializeSelection(
+                doc,
+                store,
+                false,
+                scope ?? Session.LastSpawnedNodeIds,
+                Session.GetNodeId,
+                selectionFirst: true,
+                fallbackToAllCanvasObjects: fallbackToAllCanvasObjects);
         }
 
         private void EnsureChatDocument(GH_Document doc)

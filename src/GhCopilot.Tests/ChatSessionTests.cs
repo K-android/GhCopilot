@@ -328,9 +328,21 @@ namespace GhCopilot.Tests
         [InlineData("extrude the curve", false)]
         [InlineData("wire n1 to n2", false)]
         [InlineData("make a twisted tower", false)]
+        [InlineData("inspect this file and build further on it", false)]
+        [InlineData("extend this definition", false)]
         public void IsConversationalOnlyPrompt_DistinguishesChatFromCadRequests(string prompt, bool expectedConversational)
         {
             Assert.Equal(expectedConversational, ChatPromptBuilder.IsConversationalOnlyPrompt(prompt));
+        }
+
+        [Theory]
+        [InlineData("inspect this file and build further on it", true)]
+        [InlineData("explain the whole canvas", true)]
+        [InlineData("check my open definition", true)]
+        [InlineData("change radius to 20", false)]
+        public void RequestsWholeCanvasInspection_DetectsWholeFilePrompts(string prompt, bool expected)
+        {
+            Assert.Equal(expected, ChatPromptBuilder.RequestsWholeCanvasInspection(prompt));
         }
 
         [Fact]
@@ -342,14 +354,46 @@ namespace GhCopilot.Tests
             var session = new ChatSession();
             session.CompleteTurn("hi", "hello!");
             CanvasSnapshot snap = SampleSnapshot();
-            string payload = ChatPromptBuilder.BuildConversationalPayload(session, snap, "how are you?");
+            RhinoViewportSnapshot viewport = SampleViewport();
+            string payload = ChatPromptBuilder.BuildConversationalPayload(session, snap, "how are you?", viewport);
             Assert.Contains("ACTIVE CANVAS CONTEXT", payload);
-            Assert.Contains("n1: Slider", payload);
+            Assert.Contains("\"id\":\"n1\"", payload);
+            Assert.Contains("\"name\":\"Slider\"", payload);
+            Assert.Contains("RHINO VIEWPORT & SCENE CONTEXT:", payload);
+            Assert.Contains("Perspective", payload);
+            Assert.DoesNotContain("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", payload);
+            Assert.Contains("[guid omitted]", payload);
             Assert.EndsWith("NEW USER MESSAGE:" + Environment.NewLine + "how are you?", payload);
             foreach (CanvasNodeSnapshot n in snap.Nodes)
             {
                 Assert.DoesNotContain(n.InstanceGuid.ToString(), payload);
             }
+        }
+
+        [Fact]
+        public void RhinoViewportSnapshot_FormatForPrompt_AndMainBuildInjection_WorkCleanly()
+        {
+            Assert.Equal("No active Rhino document.", new RhinoViewportSnapshot().FormatForPrompt());
+
+            RhinoViewportSnapshot viewport = SampleViewport();
+            string formatted = viewport.FormatForPrompt();
+            Assert.Contains("Document: TowerStudy.3dm, Units: Meters", formatted);
+            Assert.Contains("ActiveViewport: Perspective (Perspective, DisplayMode=Shaded)", formatted);
+            Assert.Contains("VisibleObjects: 4 (Brep=2, Curve=2)", formatted);
+            Assert.Contains("SelectedObjects: 1 (Curve=1)", formatted);
+            Assert.Contains("VisibleLayers: Default (1), Facade::Fins (3)", formatted);
+
+            string payload = ChatPromptBuilder.Build(
+                new ChatSession(),
+                SampleSnapshot(),
+                null,
+                "extend this facade",
+                Shortlist(),
+                null,
+                viewport);
+            Assert.Contains("RHINO VIEWPORT & SCENE CONTEXT:", payload);
+            Assert.Contains("TowerStudy.3dm", payload);
+            Assert.DoesNotContain("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", payload);
         }
 
         [Fact]
@@ -375,6 +419,28 @@ namespace GhCopilot.Tests
         private static IReadOnlyList<ComponentRecord> Shortlist() => new[]
         {
             new ComponentRecord { ShortId = "c001", Name = "ShortlistOnlyName", ComponentGuid = Guid.NewGuid() }
+        };
+
+        private static RhinoViewportSnapshot SampleViewport() => new RhinoViewportSnapshot
+        {
+            HasActiveDocument = true,
+            DocumentName = "TowerStudy.3dm",
+            ModelUnits = "Meters",
+            ActiveViewName = "Perspective",
+            DisplayMode = "Shaded",
+            Projection = "Perspective",
+            CameraLocation = "(40.00, -35.00, 25.00)",
+            CameraTarget = "(0.00, 0.00, 10.00)",
+            CameraDirection = "(-0.71, 0.62, -0.32)",
+            ViewportNames = new List<string> { "Perspective", "Top", "Front", "Right" },
+            TotalVisibleObjects = 4,
+            SelectedObjectCount = 1,
+            ObjectCountsByType = new Dictionary<string, int> { { "Brep", 2 }, { "Curve", 2 } },
+            SelectedCountsByType = new Dictionary<string, int> { { "Curve", 1 } },
+            VisibleLayers = new List<string> { "Default (1)", "Facade::Fins (3)" },
+            SceneBoundingBox = "(-10.00, -10.00, 0.00)..(10.00, 10.00, 50.00) (size 20.00x20.00x50.00)",
+            SelectedBoundingBox = "(-5.00, -5.00, 0.00)..(5.00, 5.00, 0.00) (size 10.00x10.00x0.00)",
+            SampleObjects = new List<string> { "[Selected] | Curve | layer=Facade::Fins | object aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
         };
 
         private static CanvasSnapshot SampleSnapshot() => new CanvasSnapshot

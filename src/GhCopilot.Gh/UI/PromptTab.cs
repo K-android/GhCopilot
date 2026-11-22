@@ -21,8 +21,8 @@ namespace GhCopilot.UI
         private const string WelcomePlaceholder =
             "Welcome to GH Copilot!\n\n" +
             "• Chat naturally — ask questions or say hi without altering your canvas.\n" +
-            "• Describe parametric geometry in plain English (e.g. a tower, grid, or circle + slider).\n" +
-            "• Click Send to automatically open a Grasshopper canvas if one isn't active yet.\n\n" +
+            "• Open any existing .gh file or Rhino 8 scene — Copilot inspects open canvas nodes & the active Rhino viewport automatically.\n" +
+            "• Describe parametric geometry in plain English (e.g. a tower, grid, or circle + slider).\n\n" +
             "Tip: Press Ctrl+Enter to send.";
 
         private readonly PreviewBar _previewBar;
@@ -175,7 +175,7 @@ namespace GhCopilot.UI
             _starterChipsPanel = new Panel { Content = chipsRow };
 
             // Quick canvas action buttons
-            _explainButton = CopilotTheme.CreateSecondaryButton("Explain", "Explain the currently selected Grasshopper components");
+            _explainButton = CopilotTheme.CreateSecondaryButton("Explain", "Explain selected Grasshopper nodes (or the whole open file & Rhino viewport when nothing is selected)");
             _explainButton.Click += OnExplainClicked;
 
             _fixButton = CopilotTheme.CreateSecondaryButton("Fix Errors", "Inspect and repair runtime errors on selected components");

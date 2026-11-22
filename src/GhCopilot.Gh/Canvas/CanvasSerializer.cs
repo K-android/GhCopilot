@@ -16,6 +16,7 @@ namespace GhCopilot.Gh.Canvas
     public static class CanvasSerializer
     {
         private const int MaxPanelTextLength = 200;
+        public const int MaxAutoInspectNodes = 80;
 
         public static CanvasSnapshot SerializeSelection(
             GH_Document doc,
@@ -23,7 +24,8 @@ namespace GhCopilot.Gh.Canvas
             bool includeNonSelectedNeighbors,
             IReadOnlyList<Guid>? fallbackNodeIds = null,
             Func<Guid, string>? stableId = null,
-            bool selectionFirst = true)
+            bool selectionFirst = true,
+            bool fallbackToAllCanvasObjects = false)
         {
             if (doc is null) throw new ArgumentNullException(nameof(doc));
             if (indexStore is null) throw new ArgumentNullException(nameof(indexStore));
@@ -42,6 +44,17 @@ namespace GhCopilot.Gh.Canvas
                 selected = (fallbackNodeIds ?? Array.Empty<Guid>())
                     .Select(id => doc.FindObject(id, false))
                     .Where(o => o != null && !(o is GH_Group)).Cast<IGH_DocumentObject>().ToList();
+            }
+
+            if (selected.Count == 0 && fallbackToAllCanvasObjects)
+            {
+                selected = doc.Objects
+                    .Where(o => o != null && !(o is GH_Group))
+                    .OrderBy(o => o.Attributes?.Pivot.X ?? 0f)
+                    .ThenBy(o => o.Attributes?.Pivot.Y ?? 0f)
+                    .ThenBy(o => o.InstanceGuid)
+                    .Take(MaxAutoInspectNodes)
+                    .ToList();
             }
 
             var idByInstanceGuid = new Dictionary<Guid, string>();
