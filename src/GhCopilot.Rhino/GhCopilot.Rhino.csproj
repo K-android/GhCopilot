@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="..\GhCopilot.Gh\UI\*.cs" Link="UI\%(Filename)%(Extension)" />
+    <Compile Include="..\GhCopilot.Gh\Canvas\RhinoViewportInspector.cs" Link="Host\RhinoViewportInspector.cs" />
   </ItemGroup>
 
   <ItemGroup>

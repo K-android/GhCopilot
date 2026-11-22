@@ -11,11 +11,17 @@ namespace GhCopilot.Core.Host
     {
         private static readonly object SyncLock = new object();
         private static IGrasshopperHostBridge? _grasshopperBridge;
+        private static IRhinoHostBridge? _rhinoBridge;
 
         /// <summary>
         /// Raised after the Grasshopper host bridge registers during PriorityLoad.
         /// </summary>
         public static event EventHandler? GrasshopperBridgeRegistered;
+
+        /// <summary>
+        /// Raised after the Rhino direct host bridge registers.
+        /// </summary>
+        public static event EventHandler? RhinoBridgeRegistered;
 
         /// <summary>
         /// Gets the registered Grasshopper host bridge, or null if Grasshopper has not loaded yet.
@@ -27,6 +33,20 @@ namespace GhCopilot.Core.Host
                 lock (SyncLock)
                 {
                     return _grasshopperBridge;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the registered Rhino direct host bridge, or null if not registered yet.
+        /// </summary>
+        public static IRhinoHostBridge? RhinoBridge
+        {
+            get
+            {
+                lock (SyncLock)
+                {
+                    return _rhinoBridge;
                 }
             }
         }
@@ -49,11 +69,30 @@ namespace GhCopilot.Core.Host
             GrasshopperBridgeRegistered?.Invoke(null, EventArgs.Empty);
         }
 
+        /// <summary>
+        /// Registers the direct Rhino host bridge instance created during plug-in initialization.
+        /// </summary>
+        public static void RegisterRhinoBridge(IRhinoHostBridge bridge)
+        {
+            if (bridge is null)
+            {
+                throw new ArgumentNullException(nameof(bridge));
+            }
+
+            lock (SyncLock)
+            {
+                _rhinoBridge = bridge;
+            }
+
+            RhinoBridgeRegistered?.Invoke(null, EventArgs.Empty);
+        }
+
         internal static void ResetForTests()
         {
             lock (SyncLock)
             {
                 _grasshopperBridge = null;
+                _rhinoBridge = null;
             }
         }
 
@@ -63,10 +102,21 @@ namespace GhCopilot.Core.Host
         public static string GetDiagnosticReport()
         {
             IGrasshopperHostBridge? bridge = GrasshopperBridge;
+            IRhinoHostBridge? rhinoBridge = RhinoBridge;
             var sb = new StringBuilder();
             sb.AppendLine($"{PluginConstants.ProductName} v{PluginConstants.Version}");
             sb.AppendLine($"Runtime: {RuntimeInformation.FrameworkDescription}");
             sb.AppendLine($"OS: {RuntimeInformation.OSDescription}");
+
+            if (rhinoBridge is null)
+            {
+                sb.AppendLine("Rhino Direct bridge: Not registered");
+            }
+            else
+            {
+                sb.AppendLine("Rhino Direct bridge: Registered");
+                sb.AppendLine($"Rhino summary: {rhinoBridge.GetRhinoStatusSummary()}");
+            }
 
             if (bridge is null)
             {

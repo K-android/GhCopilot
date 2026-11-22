@@ -22,7 +22,15 @@ namespace GhCopilot.Core.Llm
         };
 
         private static readonly Regex CadActionKeywordRegex = new Regex(
-            @"\b(?:create|make|build|add|spawn|generate|place|draw|model|design|extend|continue|further|expand|append|attach|hook|link|wire|connect|unwire|disconnect|delete|remove|change|set|update|modify|edit|fix|repair|replace|increase|decrease|slider|panel|circle|line|point|curve|surface|brep|mesh|box|sphere|cylinder|cone|torus|arc|polygon|rectangle|grid|attractor|extrude|loft|pipe|sweep|revolve|offset|move|rotate|scale|transform|array|divide|contour|voronoi|delaunay|populate|random|series|range|domain|remap|math|multiply|subtract|python|script|cluster|component|node|param|input|output|flatten|graft|simplify|reverse|tower|facade|truss|bridge|stair|spiral|wall|roof|floor|column|beam|shell|canopy|pavilion|pattern|wave|rib|fin|louver)\b",
+            @"\b(?:create|make|build|add|spawn|generate|place|draw|model|design|extend|continue|further|expand|append|attach|hook|link|wire|connect|unwire|disconnect|delete|remove|change|set|update|modify|edit|fix|repair|replace|increase|decrease|slider|panel|circle|line|point|curve|surface|brep|mesh|box|sphere|cylinder|cone|torus|arc|polygon|rectangle|grid|attractor|extrude|loft|pipe|sweep|revolve|offset|move|rotate|scale|transform|array|divide|contour|voronoi|delaunay|populate|random|series|range|domain|remap|math|multiply|subtract|python|script|cluster|component|node|param|input|output|flatten|graft|simplify|reverse|tower|facade|truss|bridge|stair|spiral|wall|roof|floor|column|beam|shell|canopy|pavilion|pattern|wave|rib|fin|louver|zoom|shaded|rendered|wireframe|ghosted|arctic|raytraced|monochrome|layer|layers|color|colour|paint|hide|show|unhide|select|deselect|rename|copy|duplicate|switch|camera|viewport)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex ImperativeEditVerbRegex = new Regex(
+            @"\b(?:create|make|build|add|spawn|generate|place|draw|model|extend|continue|expand|append|attach|wire|connect|unwire|delete|remove|change|set|update|modify|edit|fix|repair|replace|increase|decrease|move|rotate|scale|transform|array|extrude|loft|offset|copy|duplicate|hide|show|unhide|zoom|switch|color|colour|paint|rename|select|deselect)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex QuestionOpenerRegex = new Regex(
+            @"^(?:what|how\s+many|which|where|describe|tell\s+me|who|why)\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private static readonly Regex WholeCanvasRegex = new Regex(
@@ -170,6 +178,11 @@ namespace GhCopilot.Core.Llm
                 return true;
             }
 
+            if (QuestionOpenerRegex.IsMatch(normalized) && !ImperativeEditVerbRegex.IsMatch(normalized))
+            {
+                return true;
+            }
+
             if (CadActionKeywordRegex.IsMatch(normalized))
             {
                 return false;
@@ -193,10 +206,10 @@ namespace GhCopilot.Core.Llm
         {
             return """
                 You are GH Copilot, an expert Rhino 8 and Grasshopper computational design assistant.
-                The user sent a conversational message or general question (not a request to modify the Grasshopper canvas).
+                The user sent a conversational message or general question (not a request to modify the Grasshopper canvas or Rhino scene).
                 Reply directly, naturally, and concisely in plain text without returning JSON graphs or code fences.
                 If ACTIVE CANVAS CONTEXT or RHINO VIEWPORT & SCENE CONTEXT is present, use those live details to answer questions about the open Grasshopper definition, Rhino viewport camera, visible layers, or scene objects.
-                If they ask what you can do, briefly explain that you can inspect open Rhino/Grasshopper scenes, create parametric Grasshopper definitions, explain/fix components, suggest Python 3 scripts, and incrementally edit nodes via chat.
+                If they ask what you can do, briefly explain that you can directly create and edit Rhino 8 geometry, layers, colors, visibility, and viewports (even without Grasshopper), inspect open Rhino/Grasshopper scenes, build parametric Grasshopper definitions, explain/fix components, and suggest Python 3 scripts.
                 """;
         }
 

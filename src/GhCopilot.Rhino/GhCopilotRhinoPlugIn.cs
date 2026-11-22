@@ -26,6 +26,10 @@ namespace GhCopilot.Rhino
             try
             {
                 StartupDiagnostics.WriteEnvironment(GetType().Assembly);
+                if (CopilotHostRegistry.RhinoBridge is null)
+                {
+                    CopilotHostRegistry.RegisterRhinoBridge(new Host.RhinoHostBridge());
+                }
                 Panels.RegisterPanel(
                     this,
                     typeof(CopilotDockPanel),

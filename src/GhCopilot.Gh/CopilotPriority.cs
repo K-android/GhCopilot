@@ -27,6 +27,10 @@ namespace GhCopilot.Gh
         {
             StartupDiagnostics.Write("Grasshopper PriorityLoad: registering host bridge.");
             StartupDiagnostics.WriteEnvironment(typeof(CopilotPriority).Assembly);
+            if (CopilotHostRegistry.RhinoBridge is null)
+            {
+                CopilotHostRegistry.RegisterRhinoBridge(new GhCopilot.Rhino.Host.RhinoHostBridge());
+            }
             _bridge = new GrasshopperHostBridge();
             CopilotHostRegistry.RegisterGrasshopperBridge(_bridge);
             Instances.CanvasCreated += OnCanvasCreated;

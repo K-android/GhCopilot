@@ -7,7 +7,7 @@ using GhCopilot.Core.Host;
 namespace GhCopilot.UI
 {
     /// <summary>
-    /// Persistent studio preview action footer driving GroupPreview / ChatTurnTransaction Accept and Reject.
+    /// Persistent studio action footer driving Grasshopper Accept/Reject previews and Direct Rhino Undo.
     /// </summary>
     internal sealed class PreviewBar : Panel
     {
@@ -18,6 +18,7 @@ namespace GhCopilot.UI
         private readonly Button _acceptButton;
         private readonly Button _rejectButton;
         private IChatHostBridge? _subscribedChatBridge;
+        private IRhinoHostBridge? _subscribedRhinoBridge;
         private bool _isBusy;
 
         public PreviewBar()
@@ -31,7 +32,7 @@ namespace GhCopilot.UI
                 CopilotTheme.TextMuted);
 
             _previewStatusLabel = CopilotTheme.CreateLabel(
-                "No pending preview on canvas.",
+                "Ready — Rhino Direct or Grasshopper preview idle.",
                 CopilotTheme.TextSecondary,
                 CopilotTheme.SmallFont());
 
@@ -66,6 +67,7 @@ namespace GhCopilot.UI
 
             AttachBridgeEvents();
             CopilotHostRegistry.GrasshopperBridgeRegistered += OnBridgeRegistered;
+            CopilotHostRegistry.RhinoBridgeRegistered += OnBridgeRegistered;
             RefreshState();
         }
 
@@ -86,20 +88,33 @@ namespace GhCopilot.UI
         private void AttachBridgeEvents()
         {
             IChatHostBridge? chat = CopilotHostRegistry.GrasshopperBridge as IChatHostBridge;
-            if (ReferenceEquals(chat, _subscribedChatBridge))
+            if (!ReferenceEquals(chat, _subscribedChatBridge))
             {
-                return;
+                if (_subscribedChatBridge != null)
+                {
+                    _subscribedChatBridge.PreviewStateChanged -= OnBridgePreviewStateChanged;
+                }
+
+                _subscribedChatBridge = chat;
+                if (_subscribedChatBridge != null)
+                {
+                    _subscribedChatBridge.PreviewStateChanged += OnBridgePreviewStateChanged;
+                }
             }
 
-            if (_subscribedChatBridge != null)
+            IRhinoHostBridge? rhino = CopilotHostRegistry.RhinoBridge;
+            if (!ReferenceEquals(rhino, _subscribedRhinoBridge))
             {
-                _subscribedChatBridge.PreviewStateChanged -= OnBridgePreviewStateChanged;
-            }
+                if (_subscribedRhinoBridge != null)
+                {
+                    _subscribedRhinoBridge.RhinoStateChanged -= OnBridgePreviewStateChanged;
+                }
 
-            _subscribedChatBridge = chat;
-            if (_subscribedChatBridge != null)
-            {
-                _subscribedChatBridge.PreviewStateChanged += OnBridgePreviewStateChanged;
+                _subscribedRhinoBridge = rhino;
+                if (_subscribedRhinoBridge != null)
+                {
+                    _subscribedRhinoBridge.RhinoStateChanged += OnBridgePreviewStateChanged;
+                }
             }
         }
 
@@ -108,10 +123,16 @@ namespace GhCopilot.UI
             if (disposing)
             {
                 CopilotHostRegistry.GrasshopperBridgeRegistered -= OnBridgeRegistered;
+                CopilotHostRegistry.RhinoBridgeRegistered -= OnBridgeRegistered;
                 if (_subscribedChatBridge != null)
                 {
                     _subscribedChatBridge.PreviewStateChanged -= OnBridgePreviewStateChanged;
                     _subscribedChatBridge = null;
+                }
+                if (_subscribedRhinoBridge != null)
+                {
+                    _subscribedRhinoBridge.RhinoStateChanged -= OnBridgePreviewStateChanged;
+                    _subscribedRhinoBridge = null;
                 }
             }
 
@@ -129,14 +150,18 @@ namespace GhCopilot.UI
 
         public void RefreshState()
         {
-            IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
-            bool hasPreview = bridge != null && bridge.HasActivePreview;
-
-            _acceptButton.Enabled = hasPreview && !_isBusy;
-            _rejectButton.Enabled = hasPreview && !_isBusy;
+            IGrasshopperHostBridge? ghBridge = CopilotHostRegistry.GrasshopperBridge;
+            IRhinoHostBridge? rhinoBridge = CopilotHostRegistry.RhinoBridge;
+            bool hasPreview = ghBridge != null && ghBridge.HasActivePreview;
+            bool canUndoRhino = rhinoBridge != null && rhinoBridge.CanUndoLastTurn;
 
             if (hasPreview)
             {
+                _acceptButton.Enabled = !_isBusy;
+                _rejectButton.Text = "✕ Reject";
+                _rejectButton.ToolTip = "Roll back only this turn's preview changes cleanly";
+                _rejectButton.Enabled = !_isBusy;
+
                 CopilotTheme.SetCardBorder(_card, CopilotTheme.WarningAmber);
                 _pill.BackgroundColor = CopilotTheme.WarningAmberDark;
                 _pillLabel.TextColor = CopilotTheme.WarningAmber;
@@ -146,21 +171,45 @@ namespace GhCopilot.UI
             }
             else if (_isBusy)
             {
+                _acceptButton.Enabled = false;
+                _rejectButton.Text = "✕ Reject";
+                _rejectButton.ToolTip = "Roll back only this turn's preview changes cleanly";
+                _rejectButton.Enabled = false;
+
                 CopilotTheme.SetCardBorder(_card, CopilotTheme.AccentCyan);
                 _pill.BackgroundColor = CopilotTheme.AccentCyanDark;
                 _pillLabel.TextColor = CopilotTheme.AccentCyan;
                 _pillLabel.Text = "WORKING";
                 _previewStatusLabel.TextColor = CopilotTheme.TextSecondary;
-                _previewStatusLabel.Text = "Generating and validating graph turn...";
+                _previewStatusLabel.Text = "Processing your request...";
+            }
+            else if (canUndoRhino)
+            {
+                _acceptButton.Enabled = false;
+                _rejectButton.Text = "↶ Undo Rhino";
+                _rejectButton.ToolTip = "Undo the last direct Rhino edit (or press Ctrl+Z in Rhino)";
+                _rejectButton.Enabled = true;
+
+                CopilotTheme.SetCardBorder(_card, CopilotTheme.AccentCyan);
+                _pill.BackgroundColor = CopilotTheme.AccentCyanDark;
+                _pillLabel.TextColor = CopilotTheme.AccentCyan;
+                _pillLabel.Text = "RHINO APPLIED";
+                _previewStatusLabel.TextColor = CopilotTheme.TextPrimary;
+                _previewStatusLabel.Text = "Direct Rhino edit applied (Ctrl+Z or Undo supported).";
             }
             else
             {
+                _acceptButton.Enabled = false;
+                _rejectButton.Text = "✕ Reject";
+                _rejectButton.ToolTip = "Roll back only this turn's preview changes cleanly";
+                _rejectButton.Enabled = false;
+
                 CopilotTheme.SetCardBorder(_card, CopilotTheme.BorderSubtle);
                 _pill.BackgroundColor = CopilotTheme.SurfaceElevated;
                 _pillLabel.TextColor = CopilotTheme.TextMuted;
                 _pillLabel.Text = "IDLE";
                 _previewStatusLabel.TextColor = CopilotTheme.TextSecondary;
-                _previewStatusLabel.Text = "No pending preview on canvas.";
+                _previewStatusLabel.Text = "Ready — Rhino Direct or Grasshopper preview idle.";
             }
 
             PreviewStateChanged?.Invoke(this, EventArgs.Empty);
@@ -185,15 +234,31 @@ namespace GhCopilot.UI
         {
             if (_isBusy) return;
             IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
-            if (bridge is null || !bridge.RejectActivePreview())
+            if (bridge != null && bridge.HasActivePreview)
             {
+                if (!bridge.RejectActivePreview())
+                {
+                    RefreshState();
+                    MessageBox.Show(this, "No active preview group to reject.", PluginConstants.ProductName, MessageBoxType.Information);
+                    return;
+                }
+
                 RefreshState();
-                MessageBox.Show(this, "No active preview group to reject.", PluginConstants.ProductName, MessageBoxType.Information);
+                PreviewActionCompleted?.Invoke(this, "Preview rejected and removed.");
+                return;
+            }
+
+            IRhinoHostBridge? rhinoBridge = CopilotHostRegistry.RhinoBridge;
+            if (rhinoBridge != null && rhinoBridge.CanUndoLastTurn)
+            {
+                string result = rhinoBridge.UndoLastRhinoTurn();
+                RefreshState();
+                PreviewActionCompleted?.Invoke(this, result);
                 return;
             }
 
             RefreshState();
-            PreviewActionCompleted?.Invoke(this, "Preview rejected and removed.");
+            MessageBox.Show(this, "No active preview or undoable direct Rhino edit.", PluginConstants.ProductName, MessageBoxType.Information);
         }
     }
 }

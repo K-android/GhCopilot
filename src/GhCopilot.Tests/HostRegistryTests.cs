@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using GhCopilot.Core;
 using GhCopilot.Core.Host;
+using GhCopilot.Core.Llm;
 using Xunit;
 
 namespace GhCopilot.Tests
@@ -105,6 +106,70 @@ namespace GhCopilot.Tests
                 CopilotHostRegistry.GrasshopperBridgeRegistered -= handler;
                 CopilotHostRegistry.ResetForTests();
             }
+        }
+
+        [Fact]
+        public void RhinoBridge_InitiallyNull_AndDiagnosticReportReflectsUnregisteredState()
+        {
+            Assert.Null(CopilotHostRegistry.RhinoBridge);
+            string report = CopilotHostRegistry.GetDiagnosticReport();
+            Assert.Contains("Rhino Direct bridge: Not registered", report);
+        }
+
+        [Fact]
+        public void RegisterRhinoBridge_ThrowsOnNull()
+        {
+            Assert.Throws<ArgumentNullException>(() => CopilotHostRegistry.RegisterRhinoBridge(null!));
+        }
+
+        [Fact]
+        public void RegisterRhinoBridge_StoresBridgeRaisesEventAndPopulatesDiagnosticReport()
+        {
+            CopilotHostRegistry.ResetForTests();
+            int raised = 0;
+            EventHandler handler = (_, _) => raised++;
+            CopilotHostRegistry.RhinoBridgeRegistered += handler;
+            try
+            {
+                var fake = new FakeRhinoBridge("Doc=Test.3dm, Units=Millimeters");
+                CopilotHostRegistry.RegisterRhinoBridge(fake);
+                Assert.Equal(1, raised);
+                Assert.Same(fake, CopilotHostRegistry.RhinoBridge);
+
+                string report = CopilotHostRegistry.GetDiagnosticReport();
+                Assert.Contains("Rhino Direct bridge: Registered", report);
+                Assert.Contains("Doc=Test.3dm, Units=Millimeters", report);
+            }
+            finally
+            {
+                CopilotHostRegistry.RhinoBridgeRegistered -= handler;
+                CopilotHostRegistry.ResetForTests();
+            }
+        }
+
+        private sealed class FakeRhinoBridge : IRhinoHostBridge
+        {
+            private readonly string _summary;
+
+            public FakeRhinoBridge(string summary)
+            {
+                _summary = summary;
+            }
+
+            public ChatSession Session { get; } = new ChatSession();
+            public bool CanUndoLastTurn => false;
+            public bool HasActiveDocument => true;
+            public event Action<int>? TokenEstimateChanged { add { } remove { } }
+            public event Action<string>? ProgressStageChanged { add { } remove { } }
+            public event EventHandler? RhinoStateChanged { add { } remove { } }
+
+            public Task<CopilotGenerationResponse> SendRhinoChatAsync(string prompt, bool explainOnly = false, CancellationToken cancellationToken = default) =>
+                Task.FromResult(new CopilotGenerationResponse { IsSuccess = true, StatusLine = "Fake rhino done" });
+
+            public string UndoLastRhinoTurn() => "Undid";
+            public string SpawnRhinoDemo() => "Spawned";
+            public void NewChat() => Session.Clear();
+            public string GetRhinoStatusSummary() => _summary;
         }
 
         private sealed class FakeGrasshopperBridge : IGrasshopperHostBridge

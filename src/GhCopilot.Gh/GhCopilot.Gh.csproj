@@ -25,6 +25,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\GhCopilot.Rhino\Host\RhinoActionExecutor.cs" Link="Host\RhinoActionExecutor.cs" />
+    <Compile Include="..\GhCopilot.Rhino\Host\RhinoHostBridge.cs" Link="Host\RhinoHostBridge.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="Script\Python3Template.ghx" />
   </ItemGroup>
 </Project>

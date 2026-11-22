@@ -14,7 +14,7 @@ namespace GhCopilot.Gh.Canvas
     /// Reads privacy-safe scene & viewport metadata (active camera, display mode, units, visible layers,
     /// object counts, and bounding boxes) from RhinoDoc.ActiveDoc on the Rhino UI thread.
     /// </summary>
-    public static class RhinoViewportInspector
+    internal static class RhinoViewportInspector
     {
         private const int MaxObjectsToScan = 2000;
         private const int MaxSampleObjects = 25;

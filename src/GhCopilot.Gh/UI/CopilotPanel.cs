@@ -128,6 +128,7 @@ namespace GhCopilot.UI
 
             Content = layout;
             CopilotHostRegistry.GrasshopperBridgeRegistered += OnBridgeRegistered;
+            CopilotHostRegistry.RhinoBridgeRegistered += OnBridgeRegistered;
             RefreshHeaderBadges();
             StartupDiagnostics.Write("Shared UI: layout attached.");
         }
@@ -137,6 +138,7 @@ namespace GhCopilot.UI
             if (disposing)
             {
                 CopilotHostRegistry.GrasshopperBridgeRegistered -= OnBridgeRegistered;
+                CopilotHostRegistry.RhinoBridgeRegistered -= OnBridgeRegistered;
                 if (_tabHost.Content != _promptTab) _promptTab.Dispose();
                 if (_tabHost.Content != _settingsTab) _settingsTab.Dispose();
             }
@@ -158,18 +160,35 @@ namespace GhCopilot.UI
 
         public void RefreshHeaderBadges()
         {
-            bool connected = CopilotHostRegistry.GrasshopperBridge != null;
-            if (connected)
+            bool rhinoConnected = CopilotHostRegistry.RhinoBridge != null;
+            bool ghConnected = CopilotHostRegistry.GrasshopperBridge != null;
+            if (rhinoConnected && ghConnected)
+            {
+                _connectionBadge.BackgroundColor = CopilotTheme.AccentEmeraldDark;
+                _connectionLabel.TextColor = CopilotTheme.AccentEmerald;
+                _connectionLabel.Text = "● Rhino + GH";
+                _connectionBadge.ToolTip = "Direct Rhino 8 control and Grasshopper bridge both ready";
+            }
+            else if (ghConnected)
             {
                 _connectionBadge.BackgroundColor = CopilotTheme.AccentEmeraldDark;
                 _connectionLabel.TextColor = CopilotTheme.AccentEmerald;
                 _connectionLabel.Text = "● GH Ready";
+                _connectionBadge.ToolTip = "Grasshopper host bridge ready";
+            }
+            else if (rhinoConnected)
+            {
+                _connectionBadge.BackgroundColor = CopilotTheme.AccentCyanDark;
+                _connectionLabel.TextColor = CopilotTheme.AccentCyan;
+                _connectionLabel.Text = "● Rhino Ready";
+                _connectionBadge.ToolTip = "Direct Rhino 8 mode ready (no Grasshopper required)";
             }
             else
             {
                 _connectionBadge.BackgroundColor = CopilotTheme.WarningAmberDark;
                 _connectionLabel.TextColor = CopilotTheme.WarningAmber;
-                _connectionLabel.Text = "○ Open GH";
+                _connectionLabel.Text = "○ Ready";
+                _connectionBadge.ToolTip = "Waiting for host bridge initialization";
             }
 
             AppSettings settings = AppSettings.Load();
