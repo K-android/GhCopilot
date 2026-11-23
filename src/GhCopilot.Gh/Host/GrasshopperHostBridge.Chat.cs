@@ -116,14 +116,14 @@ namespace GhCopilot.Gh.Host
                     !useRhinoSelection &&
                     ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, Session, settings.PlanFirstMode))
                 {
-                    ReportStage("📐 Inspecting canvas & Rhino viewport to draft plan + diagram...");
+                    ReportStage("📋 Inspecting canvas & Rhino viewport to draft plan...");
                     (CanvasSnapshot readOnlySnapshot, RhinoViewportSnapshot viewportContext) =
                         await TryCaptureOptionalSnapshotAsync().ConfigureAwait(false);
                     string planSystem = ChatPromptBuilder.BuildPlanAndClarifySystem(CopilotWorkMode.Grasshopper);
                     string planPayload = ChatPromptBuilder.BuildConversationalPayload(Session, readOnlySnapshot, user, viewportContext);
                     tokens = EstimateSend(planSystem, planPayload, null);
                     PayloadAuditLogger.LogSentPayload("ChatPlanFirst", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, planSystem, planPayload);
-                    ReportStage($"🧠 Designing plan & schematic diagram with {settings.ModelId}...");
+                    ReportStage($"🧠 Drafting plan & clarifying questions with {settings.ModelId}...");
                     string planReply = await _geminiClient.GenerateTextAsync(
                         apiKey,
                         settings.ModelId,
@@ -142,7 +142,7 @@ namespace GhCopilot.Gh.Host
                         IsSuccess = true,
                         IsPlanProposal = true,
                         Explanation = planReply,
-                        StatusLine = "Plan & diagram ready — tap Approve & Build or reply to refine.",
+                        StatusLine = "Plan ready — tap Approve & Build or reply to refine.",
                         EstimatedInputTokens = tokens,
                         ViewportImageBase64Png = viewportContext.ViewportImageBase64Png,
                         ViewportVerificationSummary = viewSummary

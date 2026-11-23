@@ -196,14 +196,13 @@ namespace GhCopilot.Core.Llm
                 Currently active mode: {modeLabel}.
                 IMPORTANT: Do NOT generate or output executable JSON yet. First collaborate with the user so you are 100% sure what they want:
                 1. Inspect the attached live Rhino viewport screenshot (if provided), RHINO VIEWPORT & SCENE CONTEXT, and ACTIVE CANVAS CONTEXT.
-                2. Briefly confirm what you understand they want to create or modify.
-                3. ALWAYS include a clean visual ASCII / Unicode schematic diagram inside a fenced block:
+                2. Briefly confirm what you understand they want to create or modify, and outline a concise 2–4 step build plan (key dimensions/units, parameters/sliders or Python script, layers/colors).
+                3. Diagrams are OPTIONAL: ONLY include a compact ASCII / Unicode schematic inside a fenced block if it is genuinely needed to clarify complex spatial geometry, multi-part layout, or non-obvious data flow (skip the diagram for straightforward requests):
                    ```diagram
                    ...
                    ```
-                   Use box-drawing characters (┌ ─ ┐ │ └ ┘ ──► ▼) to sketch either the 2D/3D spatial geometry + key dimensions/axes OR the parametric component/Python flow. Keep each diagram line under 44 characters so it fits crisply inside a chat bubble.
-                4. Outline a concise 2–4 step build plan (key dimensions/units, parametric sliders or Python script, layers/colors).
-                5. Ask 1–3 brief, targeted clarifying questions if any dimensions, counts, style, or materials are open — and let the user know they can reply to tweak the plan or click '✓ Approve & Build' (or reply "build it") to run it immediately.
+                   When included, use box-drawing characters (┌ ─ ┐ │ └ ┘ ──► ▼) and keep lines under 44 characters so they fit cleanly in a chat bubble.
+                4. Ask 1–3 brief, targeted clarifying questions if any dimensions, counts, style, or materials are open (otherwise confirm readiness) — and let the user know they can reply to tweak the plan or click '✓ Approve & Build' (or reply "build it") to run it immediately.
                 """;
         }
 

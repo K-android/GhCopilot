@@ -248,7 +248,7 @@ namespace GhCopilot.Rhino.Host
                     string planPayload = RhinoPromptBuilder.BuildPayload(Session, snapshot, trimmed, lastCreated);
                     totalTokens = EstimateSend(planSystem, planPayload, null);
                     PayloadAuditLogger.LogSentPayload("RhinoPlanFirst", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, planSystem, planPayload);
-                    ReportStage($"🧠 Designing Rhino plan & schematic diagram with {settings.ModelId}...");
+                    ReportStage($"🧠 Drafting Rhino plan & clarifying questions with {settings.ModelId}...");
 
                     string planReply = await _geminiClient.GenerateTextAsync(
                         apiKey!,
@@ -269,7 +269,7 @@ namespace GhCopilot.Rhino.Host
                     {
                         IsSuccess = true,
                         IsPlanProposal = true,
-                        StatusLine = "Plan & diagram ready — tap Approve & Build or reply to refine.",
+                        StatusLine = "Plan ready — tap Approve & Build or reply to refine.",
                         Explanation = planReply,
                         EstimatedInputTokens = totalTokens,
                         ViewportImageBase64Png = snapshot.ViewportImageBase64Png,

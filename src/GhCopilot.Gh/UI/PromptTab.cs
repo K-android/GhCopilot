@@ -22,7 +22,7 @@ namespace GhCopilot.UI
         private static readonly string[] RhinoChipLabels = { "Plan Pavilion", "Box + Zoom", "Inspect Scene" };
         private static readonly string[] RhinoChipTooltips =
         {
-            "Collaborate on a plan + diagram first, then build directly in Rhino 8",
+            "Collaborate on a plan and questions first, then build directly in Rhino 8",
             "Create a 20x20x10 emerald box directly in Rhino and zoom extents",
             "Inspect current Rhino viewport screenshot, objects, layers, and camera"
         };
@@ -204,7 +204,7 @@ namespace GhCopilot.UI
             // Plan Approval & Viewport Check bar (contextual: Approve Plan / Verify Live Viewport)
             _approveBuildButton = CopilotTheme.CreatePrimaryButton(
                 "✓ Approve & Build",
-                "Approve the proposed plan & schematic and build it in Rhino / Grasshopper now");
+                "Approve the proposed plan and build it in Rhino / Grasshopper now");
             _approveBuildButton.MinimumSize = new Size(92, 26);
             _approveBuildButton.Click += OnApproveBuildClicked;
 
@@ -269,7 +269,7 @@ namespace GhCopilot.UI
             {
                 Text = "Plan First",
                 Checked = initialSettings.PlanFirstMode,
-                ToolTip = "Discuss the plan, view schematic diagrams, and confirm requirements before building"
+                ToolTip = "Discuss the plan and clarifying questions (with diagrams when needed) before building"
             };
             CopilotTheme.StyleCheckBox(_planFirstCheck);
             _planFirstCheck.CheckedChanged += OnPlanFirstToggled;
@@ -435,7 +435,7 @@ namespace GhCopilot.UI
                 settings.Save();
                 SetStatus(
                     settings.PlanFirstMode
-                        ? "Plan First enabled: Copilot will sketch a diagram & plan before building."
+                        ? "Plan First enabled: Copilot will confirm a plan & questions before building."
                         : "Plan First disabled: Copilot will build immediately on Send.",
                     CopilotTheme.AccentCyan);
             }

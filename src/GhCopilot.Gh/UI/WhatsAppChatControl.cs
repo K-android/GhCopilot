@@ -358,7 +358,7 @@ namespace GhCopilot.UI
             string[] bullets =
             {
                 "• Rhino Direct: Build boxes, spheres, curves, move/array, layers, colors & viewports without Grasshopper.",
-                "• Plan-First Architect: Drafts a blueprint, schematic diagram & questions before building. Tap Approve & Build or reply to tweak.",
+                "• Plan-First Architect: Discusses your requirements, outlines a plan & questions (with a diagram when useful) before building. Tap Approve & Build or reply to refine.",
                 "• Live Viewport Vision: Sees your Rhino 8 viewport before & after every change so follow-ups stay accurate.",
                 "Tip: Press Ctrl+Enter to send • Right-click any bubble to copy."
             };
@@ -540,7 +540,7 @@ namespace GhCopilot.UI
             // Header row
             string headerText = isUser
                 ? "You"
-                : (item.IsPlanProposal ? "✦ GH Copilot • Plan & Diagram" : $"✦ {item.Role}");
+                : (item.IsPlanProposal ? "✦ GH Copilot • Plan" : $"✦ {item.Role}");
             Color headerColor = isUser
                 ? Color.FromArgb(0xA7, 0xF3, 0xD0)
                 : (item.IsPlanProposal ? CopilotTheme.AccentCyan : CopilotTheme.AccentEmerald);
