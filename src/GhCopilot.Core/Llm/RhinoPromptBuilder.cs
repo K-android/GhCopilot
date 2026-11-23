@@ -14,8 +14,13 @@ namespace GhCopilot.Core.Llm
     public static class RhinoPromptBuilder
     {
         private static readonly Regex GrasshopperIntentRegex = new Regex(
-            @"\b(?:grasshopper|\.gh|ghx|slider|sliders|panel|component|components|wire|wires|canvas|parametric|attractor|voronoi|delaunay|ghpython|python\s*script|cluster|recipe|flatten|graft|data\s*tree|definition)\b",
+            @"\b(?:grasshopper|\.gh|ghx|slider|sliders|panel|component|components|node|nodes|wire|wires|canvas|parametric|attractor|voronoi|delaunay|ghpython|python\s*script|cluster|recipe|flatten|graft|data\s*tree|definition|plugin|plugins|revit|rhino\.?\s*inside|rir|bim|directshape|toposolid|adaptive\s*component|curtain\s*wall|mullion|mullions|workset|worksets|category\s*picker|family\s*type|element\s*parameter|element\s*type|structural\s+(?:column|framing|beam|wall|floor)|lunchbox|pufferfish|weaverbird|kangaroo|karamba|ladybug|honeybee|elefront|human|dendro|galapagos|wallacei|anemone|metahopper|hops|cyclops|modelur|raven|(?:add|query|inspect|create|place|build)\s+(?:a\s+|the\s+|revit\s+)?(?:wall|walls|floor|floors|roof|roofs|ceiling|ceilings|column|columns|beam|beams|level|levels|grid|grids|element|elements|family|families|parameter|parameters|room|rooms|schedule|schedules|sheet|sheets))\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        public static bool HasExplicitGrasshopperIntent(string? prompt)
+        {
+            return !string.IsNullOrWhiteSpace(prompt) && GrasshopperIntentRegex.IsMatch(prompt!);
+        }
 
         private static readonly Regex RhinoDirectIntentRegex = new Regex(
             @"\b(?:display\s*mode|shaded|rendered|wireframe|ghosted|arctic|raytraced|monochrome|zoom\s*(?:extents|selected|all)|camera|viewport|perspective\s*view|top\s*view|front\s*view|right\s*view|left\s*view|layer|layers|hide|unhide|show\s*(?:all|hidden|layer)|select\s*(?:all|curves|breps|meshes|points|objects|layer)|rename|color|colour|paint|without\s+grasshopper|directly\s+in\s+rhino|in\s+rhino\s+directly)\b",

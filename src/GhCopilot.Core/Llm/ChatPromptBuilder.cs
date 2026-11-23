@@ -185,25 +185,60 @@ namespace GhCopilot.Core.Llm
             return true;
         }
 
-        public static string BuildPlanAndClarifySystem(CopilotWorkMode targetMode)
+        public static string BuildPlanAndClarifySystem(
+            CopilotWorkMode targetMode,
+            IReadOnlyList<ComponentRecord>? candidateComponents = null,
+            IReadOnlyList<string>? installedPlugins = null)
         {
             string modeLabel = targetMode == CopilotWorkMode.RhinoDirect
                 ? "Direct Rhino 8 Mode (creating/editing native Rhino geometry, layers, colors, and viewport)"
-                : "Grasshopper Parametric Mode (building/patching parametric Grasshopper nodes or Python 3 scripts)";
+                : "Grasshopper Parametric Mode (wiring native Grasshopper components, installed third-party plugins, and Rhino.Inside.Revit components when loaded)";
 
-            return $"""
+            var sb = new StringBuilder();
+            sb.AppendLine($$"""
                 You are GH Copilot, an expert Rhino 8 & Grasshopper computational architect texting with the user in a conversational WhatsApp-style chat.
-                Currently active mode: {modeLabel}.
+                Currently active mode: {{modeLabel}}.
                 IMPORTANT: Do NOT generate or output executable JSON yet. First collaborate with the user so you are 100% sure what they want:
                 1. Inspect the attached live Rhino viewport screenshot (if provided), RHINO VIEWPORT & SCENE CONTEXT, and ACTIVE CANVAS CONTEXT.
-                2. Briefly confirm what you understand they want to create or modify, and outline a concise 2–4 step build plan (key dimensions/units, parameters/sliders or Python script, layers/colors).
-                3. Diagrams are OPTIONAL: ONLY include a compact ASCII / Unicode schematic inside a fenced block if it is genuinely needed to clarify complex spatial geometry, multi-part layout, or non-obvious data flow (skip the diagram for straightforward requests):
+                2. Briefly confirm what you understand they want to create or modify, and outline a concise 2–4 step build plan (key dimensions/units, parameters/sliders, components, layers/colors).
+                3. COMPONENT-FIRST RULE: In Grasshopper mode, ALWAYS plan around wiring existing native Grasshopper components, installed third-party plugin components (e.g., LunchBox, Pufferfish, Weaverbird, Human, Elefront, Kangaroo, etc.), and Rhino.Inside.Revit ("Revit>*") components shown below whenever they fit! Do NOT propose writing a Python 3 script unless no combination of native/plugin/Revit components can solve the logic or the user explicitly asked for Python.
+                4. Diagrams are OPTIONAL: ONLY include a compact ASCII / Unicode schematic inside a fenced block if it is genuinely needed to clarify complex spatial geometry, multi-part layout, or non-obvious data flow (skip the diagram for straightforward requests):
                    ```diagram
                    ...
                    ```
                    When included, use box-drawing characters (┌ ─ ┐ │ └ ┘ ──► ▼) and keep lines under 44 characters so they fit cleanly in a chat bubble.
-                4. Ask 1–3 brief, targeted clarifying questions if any dimensions, counts, style, or materials are open (otherwise confirm readiness) — and let the user know they can reply to tweak the plan or click '✓ Approve & Build' (or reply "build it") to run it immediately.
-                """;
+                5. Ask 1–3 brief, targeted clarifying questions if any dimensions, counts, style, or materials are open (otherwise confirm readiness) — and let the user know they can reply to tweak the plan or click '✓ Approve & Build' (or reply "build it") to run it immediately.
+                """);
+
+            if (installedPlugins != null && installedPlugins.Count > 0)
+            {
+                sb.AppendLine();
+                sb.Append("INSTALLED GRASSHOPPER PLUGINS / LIBRARIES: ");
+                sb.AppendLine(string.Join(", ", installedPlugins));
+            }
+
+            if (candidateComponents != null && candidateComponents.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("AVAILABLE NATIVE / PLUGIN / REVIT COMPONENTS MATCHING THIS REQUEST:");
+                int count = 0;
+                foreach (ComponentRecord record in candidateComponents)
+                {
+                    if (record == null)
+                    {
+                        continue;
+                    }
+
+                    sb.AppendLine(record.FormatPromptContextLine());
+                    count++;
+                    if (count >= 35)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            return sb.ToString().TrimEnd();
         }
 
         public static string BuildEffectiveExecutionPrompt(string rawUserPrompt, ChatSession session)
@@ -379,7 +414,7 @@ namespace GhCopilot.Core.Llm
                 The user sent a conversational message or general question (not a request to modify the Grasshopper canvas or Rhino scene).
                 Reply directly, naturally, and concisely in plain text without returning JSON graphs or code fences.
                 If ACTIVE CANVAS CONTEXT or RHINO VIEWPORT & SCENE CONTEXT is present, use those live details to answer questions about the open Grasshopper definition, Rhino viewport camera, visible layers, or scene objects.
-                If they ask what you can do, briefly explain that you can directly create and edit Rhino 8 geometry, layers, colors, visibility, and viewports (even without Grasshopper), inspect open Rhino/Grasshopper scenes, build parametric Grasshopper definitions, explain/fix components, and suggest Python 3 scripts.
+                If they ask what you can do, briefly explain that you can directly create and edit Rhino 8 geometry, layers, colors, visibility, and viewports (even without Grasshopper), inspect open Rhino/Grasshopper scenes, build parametric Grasshopper definitions using native components, installed third-party plugins (LunchBox, Pufferfish, Weaverbird, etc.), and Rhino.Inside.Revit ("Revit>*") components when loaded inside Revit, explain/fix components, and write Python 3 scripts when custom math is needed.
                 """;
         }
 

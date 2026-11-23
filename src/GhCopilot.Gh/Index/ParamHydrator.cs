@@ -74,6 +74,20 @@ namespace GhCopilot.Gh.Index
 
                 if (instance is IGH_Component component)
                 {
+                    if (component.Params.Input.Count == 0 &&
+                        component.Params.Output.Count == 0 &&
+                        instance is IGH_VariableParameterComponent varComp)
+                    {
+                        try
+                        {
+                            varComp.VariableParameterMaintenance();
+                        }
+                        catch (Exception)
+                        {
+                            // Ignore variable parameter maintenance failures outside a full document context.
+                        }
+                    }
+
                     record.IsStandaloneParam = false;
 
                     foreach (IGH_Param input in component.Params.Input)

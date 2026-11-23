@@ -116,10 +116,17 @@ namespace GhCopilot.Gh.Host
                     !useRhinoSelection &&
                     ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, Session, settings.PlanFirstMode))
                 {
-                    ReportStage("📋 Inspecting canvas & Rhino viewport to draft plan...");
+                    ReportStage("📋 Inspecting canvas, installed plugins & Rhino viewport to draft plan...");
                     (CanvasSnapshot readOnlySnapshot, RhinoViewportSnapshot viewportContext) =
                         await TryCaptureOptionalSnapshotAsync().ConfigureAwait(false);
-                    string planSystem = ChatPromptBuilder.BuildPlanAndClarifySystem(CopilotWorkMode.Grasshopper);
+                    IndexStore planStore = EnsureIndexLoaded();
+                    string planQuery = ChatPromptBuilder.BuildRetrievalQuery(Session, user);
+                    IReadOnlyList<ComponentRecord> planShortlist = BuildShortlistForFix(planStore, readOnlySnapshot, planQuery)
+                        .Take(35)
+                        .ToList();
+                    ParamHydrator.HydrateShortlist(planShortlist);
+                    IReadOnlyList<string> installedPlugins = planStore.GetInstalledPluginNames();
+                    string planSystem = ChatPromptBuilder.BuildPlanAndClarifySystem(CopilotWorkMode.Grasshopper, planShortlist, installedPlugins);
                     string planPayload = ChatPromptBuilder.BuildConversationalPayload(Session, readOnlySnapshot, user, viewportContext);
                     tokens = EstimateSend(planSystem, planPayload, null);
                     PayloadAuditLogger.LogSentPayload("ChatPlanFirst", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, planSystem, planPayload);
@@ -524,6 +531,7 @@ namespace GhCopilot.Gh.Host
                 RhinoViewportSnapshot viewport = RhinoViewportInspector.InspectActiveDoc(captureImage: true);
                 try
                 {
+                    IndexStore store = EnsureIndexLoaded();
                     GH_Document? doc = Instances.ActiveCanvas?.Document;
                     if (doc == null)
                     {
@@ -531,7 +539,6 @@ namespace GhCopilot.Gh.Host
                         return;
                     }
 
-                    IndexStore store = EnsureIndexLoaded();
                     tcs.TrySetResult((CaptureChatSnapshot(doc, store, fallbackToAllCanvasObjects: true), viewport));
                 }
                 catch (Exception)

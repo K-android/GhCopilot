@@ -20,7 +20,7 @@ namespace GhCopilot.Core.Llm
 
                 Strict rules:
                 1. Every node's "ref" MUST be one of the short IDs from SHORTLIST COMPONENTS. Never invent GUIDs or unlisted component IDs.
-                2. Prefer [COMPANY] components or clusters over native equivalents whenever a company item fits the request.
+                2. COMPONENT-FIRST PRIORITY: Prefer [COMPANY] components/clusters first, then existing native Grasshopper components, installed third-party plugin components (e.g., LunchBox, Pufferfish, Weaverbird, Human, Elefront, Kangaroo, Karamba, etc.), and Rhino.Inside.Revit ("Revit>*") components from SHORTLIST COMPONENTS whenever they match the request.
                 3. Every wire connects an OUTPUT parameter (fromParam) of fromNode to an INPUT parameter (toParam) of toNode.
                 4. Use exact parameter names shown in "in:" and "out:". For standalone Number Slider or Panel nodes, use "" (empty string) or the shown parameter name.
                 5. Never create cycles or wire into an output / out of an input.
@@ -28,7 +28,7 @@ namespace GhCopilot.Core.Llm
                 7. For data-tree operations, you may set pin modifiers directly on wires ("targetMapping": "flatten"|"graft", "simplify": true, "reverse": true) or via node settings ("flattenInputs", "graftInputs", "simplifyInputs", "reverseInputs") instead of cluttering the canvas with extra tree nodes.
                 8. If SELECTED CANVAS OUTPUTS AVAILABLE FOR WIRING are shown and the user asks to operate on their selection, wire fromNode "$selected" (or "$s1", "$s2", ...) into your new nodes.
                 9. Arrange nodes cleanly left-to-right: inputs around x=150, advancing +200 per stage; vertical spacing +90 per parallel node.
-                10. For complex procedural geometry or loops (e.g., spiral staircase, recursive truss) that are fragile to wire natively, set "script" to a clean Python 3 script block (import Rhino.Geometry as rg, import math only; assign outputs to variables matching outputs[].name) instead of forcing fragile native wiring. Never use os, sys, subprocess, network, file I/O, or eval/exec.
+                10. AVOID UNNECESSARY PYTHON SCRIPTS: NEVER use the Python 3 "script" block when shortlisted native Grasshopper components, installed plugin components, or Rhino.Inside.Revit ("Revit>*") components (e.g., Add Wall, Add Floor, Add DirectShape Geometry, Query Elements, Element Parameter, Query Levels, Diamond Panels, Weaverbird, etc.) can be wired to solve the task. Only use "script" as a last resort for custom iterative/recursive math or loops that no shortlisted components cover, or when the user explicitly requests Python (using only import Rhino.Geometry as rg and import math; never os, sys, subprocess, network, file I/O, or eval/exec).
                 """;
         }
 

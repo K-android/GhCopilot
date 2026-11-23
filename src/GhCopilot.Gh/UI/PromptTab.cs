@@ -710,6 +710,11 @@ namespace GhCopilot.UI
             }
 
             ChatSession session = CopilotHostRegistry.SharedSession;
+            if (RhinoPromptBuilder.HasExplicitGrasshopperIntent(prompt))
+            {
+                return CopilotWorkMode.Grasshopper;
+            }
+
             CopilotWorkMode resolved = RhinoPromptBuilder.ResolveEffectiveMode(CopilotWorkMode.Auto, prompt, isGhOpen, false);
 
             // Preserve planned/active target engine when user approves a plan or requests a follow-up tweak

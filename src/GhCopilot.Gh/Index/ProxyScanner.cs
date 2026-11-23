@@ -26,6 +26,7 @@ namespace GhCopilot.Gh.Index
             int proxyCount = server?.ObjectProxies?.Count ?? 0;
             var fingerprints = new List<string>
             {
+                "schema:v2-libname",
                 $"company:{companyScan.Fingerprint}"
             };
 
@@ -93,6 +94,7 @@ namespace GhCopilot.Gh.Index
                 IGH_ObjectProxy proxy = sorted[i].Proxy;
                 bool isCompany = UserObjectFolderLoader.IsCompanyProxy(proxy, settings.SharedLibraryFolder);
                 string source = DetermineSource(proxy, librariesById);
+                string libraryName = ResolveLibraryName(proxy, librariesById);
                 Type? proxyType = proxy.Type;
                 bool isStandaloneParam = proxyType != null &&
                                          typeof(IGH_Param).IsAssignableFrom(proxyType) &&
@@ -108,6 +110,7 @@ namespace GhCopilot.Gh.Index
                     SubCategory = proxy.Desc?.SubCategory ?? string.Empty,
                     Description = proxy.Desc?.Description ?? string.Empty,
                     Source = source,
+                    LibraryName = libraryName,
                     IsCompany = isCompany,
                     IsStandaloneParam = isStandaloneParam,
                     IsHydrated = false
@@ -158,6 +161,19 @@ namespace GhCopilot.Gh.Index
             }
 
             return "plugin";
+        }
+
+        private static string ResolveLibraryName(IGH_ObjectProxy proxy, Dictionary<Guid, GH_AssemblyInfo> librariesById)
+        {
+            if (proxy.LibraryGuid != Guid.Empty &&
+                librariesById.TryGetValue(proxy.LibraryGuid, out GH_AssemblyInfo? lib) &&
+                !string.IsNullOrWhiteSpace(lib.Name))
+            {
+                return lib.Name.Trim();
+            }
+
+            string? assemblyName = proxy.Type?.Assembly?.GetName()?.Name;
+            return string.IsNullOrWhiteSpace(assemblyName) ? string.Empty : assemblyName!.Trim();
         }
     }
 }

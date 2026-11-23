@@ -75,6 +75,40 @@ namespace GhCopilot.Core.Index
 
         public IReadOnlyList<ComponentRecord> AllComponents => _components;
 
+        public IReadOnlyList<string> GetInstalledPluginNames()
+        {
+            var names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ComponentRecord item in _components)
+            {
+                if (item is null)
+                {
+                    continue;
+                }
+
+                if (item.IsRevitComponent)
+                {
+                    names.Add("Rhino.Inside.Revit (Revit)");
+                    continue;
+                }
+
+                if (!string.Equals(item.Source, "plugin", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string label = !string.IsNullOrWhiteSpace(item.LibraryName)
+                    ? item.LibraryName.Trim()
+                    : item.Category.Trim();
+
+                if (!string.IsNullOrWhiteSpace(label))
+                {
+                    names.Add(label);
+                }
+            }
+
+            return names.ToList();
+        }
+
         public ComponentRecord? GetByShortId(string shortId)
         {
             if (string.IsNullOrWhiteSpace(shortId))

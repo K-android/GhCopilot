@@ -28,6 +28,7 @@ namespace GhCopilot.Gh.Host
         private readonly GeminiClient _geminiClient = new GeminiClient();
         private GroupPreview? _activePreview;
         private IndexStore? _indexStore;
+        private int _lastIndexedProxyCount = -1;
         public event EventHandler? PreviewStateChanged;
 
         public bool IsCanvasCreated => Instances.ActiveCanvas != null;
@@ -63,7 +64,8 @@ namespace GhCopilot.Gh.Host
         {
             lock (_indexLock)
             {
-                if (_indexStore != null)
+                int currentProxyCount = Instances.ComponentServer?.ObjectProxies?.Count ?? 0;
+                if (_indexStore != null && _lastIndexedProxyCount == currentProxyCount)
                 {
                     return _indexStore;
                 }
@@ -73,6 +75,7 @@ namespace GhCopilot.Gh.Host
                     IndexStore.GetDefaultCacheFilePath(),
                     cacheKey,
                     ProxyScanner.ScanCurrentSession);
+                _lastIndexedProxyCount = currentProxyCount;
 
                 return _indexStore;
             }
@@ -104,6 +107,7 @@ namespace GhCopilot.Gh.Host
             lock (_indexLock)
             {
                 _indexStore = null;
+                _lastIndexedProxyCount = -1;
             }
 
             IndexStore store = EnsureIndexLoaded();

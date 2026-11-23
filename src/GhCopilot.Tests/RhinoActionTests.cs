@@ -389,6 +389,118 @@ namespace GhCopilot.Tests
             Assert.Contains("iVBORw0KGgo=", capturedBody);
         }
 
+        [Fact]
+        public void ComponentRecord_FormatPromptContextLine_IncludesPluginLibraryNameAndRevitFlag()
+        {
+            var revitWall = new ComponentRecord
+            {
+                ShortId = "c0142",
+                Name = "Add Wall (Curve)",
+                Category = "Revit",
+                SubCategory = "Wall",
+                Source = "plugin",
+                LibraryName = "RhinoInside.Revit.GH",
+                Inputs = new List<ParamRecord> { new ParamRecord { Name = "Curve", TypeName = "Curve", Access = "item" } },
+                Outputs = new List<ParamRecord> { new ParamRecord { Name = "Wall", TypeName = "Wall", Access = "item" } }
+            };
+
+            Assert.True(revitWall.IsRevitComponent);
+            string revitLine = revitWall.FormatPromptContextLine();
+            Assert.Contains("Revit>Wall [RhinoInside.Revit.GH]", revitLine);
+
+            var lunchboxPanel = new ComponentRecord
+            {
+                ShortId = "c0210",
+                Name = "Diamond Panels",
+                Category = "LunchBox",
+                SubCategory = "Panels",
+                Source = "plugin",
+                LibraryName = "LunchBox"
+            };
+
+            Assert.False(lunchboxPanel.IsRevitComponent);
+            string lbLine = lunchboxPanel.FormatPromptContextLine();
+            Assert.Contains("LunchBox>Panels", lbLine);
+            Assert.DoesNotContain("[LunchBox]", lbLine);
+        }
+
+        [Fact]
+        public void Retriever_PrioritizesRhinoInsideRevitAndThirdPartyPluginComponents_OnMatchingPrompts()
+        {
+            var corpus = new List<ComponentRecord>
+            {
+                new ComponentRecord { ShortId = "c0001", Name = "Number Slider", Category = "Params", SubCategory = "Input", Source = "native" },
+                new ComponentRecord { ShortId = "c0002", Name = "Panel", Category = "Params", SubCategory = "Input", Source = "native" },
+                new ComponentRecord { ShortId = "c0003", Name = "Circle", Category = "Curve", SubCategory = "Primitive", Source = "native" },
+                new ComponentRecord { ShortId = "c0004", Name = "Extrude", Category = "Surface", SubCategory = "Freeform", Source = "native" },
+                new ComponentRecord { ShortId = "c0005", Name = "Python 3 Script", Category = "Maths", SubCategory = "Script", Source = "native" },
+                new ComponentRecord { ShortId = "c0100", Name = "Diamond Panels", Category = "LunchBox", SubCategory = "Panels", Source = "plugin", LibraryName = "LunchBox", Description = "Create a diamond paneling grid on a surface" },
+                new ComponentRecord { ShortId = "c0101", Name = "Catmull-Clark Subdivision", Category = "Weaverbird", SubCategory = "Mesh", Source = "plugin", LibraryName = "Weaverbird", Description = "Subdivide a mesh using Catmull-Clark" },
+                new ComponentRecord { ShortId = "c0200", Name = "Add Wall (Curve)", Category = "Revit", SubCategory = "Wall", Source = "plugin", LibraryName = "RhinoInside.Revit.GH", Description = "Given a curve, it adds a Wall element to the active Revit document" },
+                new ComponentRecord { ShortId = "c0201", Name = "Add Floor", Category = "Revit", SubCategory = "Host", Source = "plugin", LibraryName = "RhinoInside.Revit.GH", Description = "Given its outline boundary, it adds a Floor element to the active Revit document" },
+                new ComponentRecord { ShortId = "c0202", Name = "Query Levels", Category = "Revit", SubCategory = "Model", Source = "plugin", LibraryName = "RhinoInside.Revit.GH", Description = "Get Revit document levels" },
+                new ComponentRecord { ShortId = "c0203", Name = "Add DirectShape Geometry", Category = "Revit", SubCategory = "DirectShape", Source = "plugin", LibraryName = "RhinoInside.Revit.GH", Description = "Add geometry as a DirectShape element in Revit" },
+                new ComponentRecord { ShortId = "c0204", Name = "Element Parameter", Category = "Revit", SubCategory = "Parameter", Source = "plugin", LibraryName = "RhinoInside.Revit.GH", Description = "Get or set Revit element parameter values" }
+            };
+
+            IReadOnlyList<ComponentRecord> revitResults = Retriever.Retrieve(corpus, "create Revit walls from curves on Level 1", 8);
+            Assert.Contains(revitResults, c => c.Name == "Add Wall (Curve)");
+            Assert.Contains(revitResults, c => c.Name == "Query Levels");
+            Assert.Equal("Add Wall (Curve)", revitResults[0].Name);
+
+            IReadOnlyList<ComponentRecord> pluginResults = Retriever.Retrieve(corpus, "create diamond diagrid panels on a surface", 6);
+            Assert.Equal("Diamond Panels", pluginResults[0].Name);
+
+            IReadOnlyList<ComponentRecord> meshResults = Retriever.Retrieve(corpus, "smooth subdivide mesh catmull clark", 6);
+            Assert.Equal("Catmull-Clark Subdivision", meshResults[0].Name);
+
+            var store = new IndexStore(corpus, "test-key");
+            IReadOnlyList<string> plugins = store.GetInstalledPluginNames();
+            Assert.Contains("LunchBox", plugins);
+            Assert.Contains("Weaverbird", plugins);
+            Assert.Contains("Rhino.Inside.Revit (Revit)", plugins);
+        }
+
+        [Theory]
+        [InlineData("create Revit walls along my curves on Level 1", false, CopilotWorkMode.Grasshopper)]
+        [InlineData("query Revit elements and update their parameters", false, CopilotWorkMode.Grasshopper)]
+        [InlineData("add DirectShape brep geometry in Rhino.Inside.Revit", false, CopilotWorkMode.Grasshopper)]
+        [InlineData("panel this surface using LunchBox diamond panels", false, CopilotWorkMode.Grasshopper)]
+        [InlineData("subdivide this mesh with Weaverbird", false, CopilotWorkMode.Grasshopper)]
+        [InlineData("tween two curves using Pufferfish", false, CopilotWorkMode.Grasshopper)]
+        [InlineData("create layer Walls and paint selected red", true, CopilotWorkMode.RhinoDirect)]
+        public void ResolveEffectiveMode_RoutesRevitAndPluginPromptsToGrasshopperInAutoMode(
+            string prompt,
+            bool isGhOpen,
+            CopilotWorkMode expected)
+        {
+            CopilotWorkMode actual = RhinoPromptBuilder.ResolveEffectiveMode(CopilotWorkMode.Auto, prompt, isGhOpen, useRhinoSelection: false);
+            Assert.Equal(expected, actual);
+        }
+
+        [Fact]
+        public void PlanFirstSystem_IncludesInstalledPluginsAndShortlist_AndEnforcesComponentFirstOverPython()
+        {
+            var candidates = new List<ComponentRecord>
+            {
+                new ComponentRecord { ShortId = "c0200", Name = "Add Wall (Curve)", Category = "Revit", SubCategory = "Wall", Source = "plugin", LibraryName = "RhinoInside.Revit.GH" },
+                new ComponentRecord { ShortId = "c0100", Name = "Diamond Panels", Category = "LunchBox", SubCategory = "Panels", Source = "plugin", LibraryName = "LunchBox" }
+            };
+            var plugins = new[] { "LunchBox", "Rhino.Inside.Revit (Revit)" };
+
+            string planSystem = ChatPromptBuilder.BuildPlanAndClarifySystem(CopilotWorkMode.Grasshopper, candidates, plugins);
+            Assert.Contains("COMPONENT-FIRST RULE", planSystem);
+            Assert.Contains("Do NOT propose writing a Python 3 script", planSystem);
+            Assert.Contains("INSTALLED GRASSHOPPER PLUGINS / LIBRARIES: LunchBox, Rhino.Inside.Revit (Revit)", planSystem);
+            Assert.Contains("AVAILABLE NATIVE / PLUGIN / REVIT COMPONENTS MATCHING THIS REQUEST:", planSystem);
+            Assert.Contains("Add Wall (Curve)", planSystem);
+            Assert.Contains("Diamond Panels", planSystem);
+
+            string sysInstruction = PromptBuilder.BuildSystemInstruction();
+            Assert.Contains("COMPONENT-FIRST PRIORITY", sysInstruction);
+            Assert.Contains("AVOID UNNECESSARY PYTHON SCRIPTS", sysInstruction);
+        }
+
         private sealed class StubHttpHandler : HttpMessageHandler
         {
             private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;

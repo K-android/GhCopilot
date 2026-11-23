@@ -34,6 +34,14 @@ namespace GhCopilot.Core.Index
         [JsonPropertyName("source")]
         public string Source { get; set; } = "native";
 
+        [JsonPropertyName("libraryName")]
+        public string LibraryName { get; set; } = string.Empty;
+
+        [JsonIgnore]
+        public bool IsRevitComponent =>
+            string.Equals(Category, "Revit", StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrWhiteSpace(LibraryName) && LibraryName.IndexOf("Revit", StringComparison.OrdinalIgnoreCase) >= 0);
+
         [JsonPropertyName("isCompany")]
         public bool IsCompany { get; set; }
 
@@ -77,6 +85,15 @@ namespace GhCopilot.Core.Index
             else
             {
                 sb.Append(Source);
+            }
+
+            if (!string.IsNullOrWhiteSpace(LibraryName) &&
+                string.Equals(Source, "plugin", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(LibraryName, Category, StringComparison.OrdinalIgnoreCase))
+            {
+                sb.Append(" [");
+                sb.Append(LibraryName);
+                sb.Append(']');
             }
 
             sb.Append(" | in: ");

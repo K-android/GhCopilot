@@ -14,9 +14,93 @@ namespace GhCopilot.Core.Index
         private const double B = 0.75;
         private const double CompanyMultiplier = 2.5;
         private const double CompanyAdditiveBoost = 5.0;
+        private const double ExpansionTermWeight = 0.55;
 
         private static readonly Regex CamelBoundaryRegex = new Regex("(?<=[a-z0-9])(?=[A-Z])", RegexOptions.Compiled);
         private static readonly Regex TokenSplitRegex = new Regex("[^a-zA-Z0-9]+", RegexOptions.Compiled);
+
+        private static readonly HashSet<string> ExplicitRevitTokens = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "revit", "rir", "bim", "directshape", "toposolid", "workset", "worksets"
+        };
+
+        private static readonly HashSet<string> BimElementTokens = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "wall", "walls", "floor", "floors", "slab", "slabs", "roof", "roofs",
+            "column", "columns", "beam", "beams", "framing", "structural",
+            "level", "levels", "grid", "grids", "family", "families",
+            "category", "categories", "element", "elements", "parameter", "parameters",
+            "schedule", "schedules", "sheet", "sheets", "room", "rooms",
+            "mullion", "mullions", "curtain", "ceiling", "ceilings", "door", "doors", "window", "windows"
+        };
+
+        private static readonly Dictionary<string, string[]> DomainExpansions = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["revit"] = new[] { "revit", "element", "category", "type", "parameter", "level", "query", "add", "inspect", "directshape" },
+            ["rir"] = new[] { "revit", "element", "category", "type", "parameter", "level", "query", "add", "inspect", "directshape" },
+            ["bim"] = new[] { "revit", "element", "category", "type", "parameter", "level", "query", "add", "directshape" },
+            ["wall"] = new[] { "wall", "add", "curve", "profile", "level", "type", "revit" },
+            ["walls"] = new[] { "wall", "add", "curve", "profile", "level", "type", "revit" },
+            ["floor"] = new[] { "floor", "add", "boundary", "level", "type", "revit" },
+            ["floors"] = new[] { "floor", "add", "boundary", "level", "type", "revit" },
+            ["slab"] = new[] { "floor", "add", "boundary", "level", "type", "revit" },
+            ["roof"] = new[] { "roof", "add", "boundary", "level", "type", "revit" },
+            ["roofs"] = new[] { "roof", "add", "boundary", "level", "type", "revit" },
+            ["column"] = new[] { "column", "structural", "add", "level", "type", "revit" },
+            ["columns"] = new[] { "column", "structural", "add", "level", "type", "revit" },
+            ["beam"] = new[] { "beam", "structural", "framing", "add", "curve", "type", "revit" },
+            ["beams"] = new[] { "beam", "structural", "framing", "add", "curve", "type", "revit" },
+            ["framing"] = new[] { "framing", "structural", "beam", "add", "curve", "revit" },
+            ["level"] = new[] { "level", "levels", "query", "add", "identity", "elevation", "revit" },
+            ["levels"] = new[] { "level", "levels", "query", "add", "identity", "elevation", "revit" },
+            ["grid"] = new[] { "grid", "grids", "query", "add", "revit" },
+            ["grids"] = new[] { "grid", "grids", "query", "add", "revit" },
+            ["family"] = new[] { "family", "type", "types", "query", "picker", "element", "component", "location", "revit" },
+            ["families"] = new[] { "family", "type", "types", "query", "picker", "element", "component", "location", "revit" },
+            ["category"] = new[] { "category", "categories", "query", "picker", "filter", "revit" },
+            ["categories"] = new[] { "category", "categories", "query", "picker", "filter", "revit" },
+            ["element"] = new[] { "element", "elements", "query", "inspect", "parameter", "filter", "geometry", "revit" },
+            ["elements"] = new[] { "element", "elements", "query", "inspect", "parameter", "filter", "geometry", "revit" },
+            ["parameter"] = new[] { "parameter", "parameters", "element", "inspect", "identity", "revit" },
+            ["parameters"] = new[] { "parameter", "parameters", "element", "inspect", "identity", "revit" },
+            ["directshape"] = new[] { "directshape", "geometry", "brep", "mesh", "add", "category", "revit" },
+            ["room"] = new[] { "room", "area", "spatial", "element", "query", "add", "revit" },
+            ["rooms"] = new[] { "room", "area", "spatial", "element", "query", "add", "revit" },
+            ["schedule"] = new[] { "view", "sheet", "schedule", "query", "revit" },
+            ["schedules"] = new[] { "view", "sheet", "schedule", "query", "revit" },
+            ["sheet"] = new[] { "view", "sheet", "schedule", "query", "revit" },
+            ["sheets"] = new[] { "view", "sheet", "schedule", "query", "revit" },
+            ["diagrid"] = new[] { "panel", "panels", "lunchbox", "grid", "divide", "surface", "structure" },
+            ["paneling"] = new[] { "panel", "panels", "lunchbox", "grid", "divide", "surface" },
+            ["panels"] = new[] { "panel", "panels", "lunchbox", "diamond", "quad", "triangular", "surface" },
+            ["hex"] = new[] { "hexagon", "cells", "panel", "lunchbox", "grid", "surface" },
+            ["hexagon"] = new[] { "hexagon", "cells", "panel", "lunchbox", "grid", "surface" },
+            ["diamond"] = new[] { "diamond", "panel", "panels", "lunchbox", "surface" },
+            ["subdivide"] = new[] { "weaverbird", "mesh", "subdivision", "catmull", "clark", "loop" },
+            ["catmull"] = new[] { "weaverbird", "mesh", "subdivision", "catmull", "clark" },
+            ["thicken"] = new[] { "weaverbird", "mesh", "thicken", "offset", "pufferfish" },
+            ["tween"] = new[] { "pufferfish", "tween", "morph", "curve", "surface", "plane" },
+            ["morph"] = new[] { "pufferfish", "morph", "tween", "box", "surface" },
+            ["bake"] = new[] { "bake", "attributes", "layer", "elefront", "human", "object" },
+            ["attributes"] = new[] { "attributes", "layer", "elefront", "human", "object" }
+        };
+
+        private static readonly string[] CoreRevitPrimitiveNames =
+        {
+            "Query Categories",
+            "Category Picker",
+            "Query Types",
+            "Element Type Picker",
+            "Query Elements",
+            "Inspect Element",
+            "Element Parameter",
+            "Query Levels",
+            "Add Level",
+            "Add Wall (Curve)",
+            "Add Floor",
+            "Add DirectShape Geometry",
+            "Graphical Element"
+        };
 
         private static readonly string[] CorePrimitiveNames =
         {
@@ -77,6 +161,7 @@ namespace GhCopilot.Core.Index
                 var freqs = new Dictionary<string, double>(StringComparer.Ordinal);
 
                 AddWeightedTokens(freqs, Tokenize(record.Name), 3.0);
+                AddWeightedTokens(freqs, Tokenize(record.LibraryName), 2.2);
                 AddWeightedTokens(freqs, Tokenize(record.NickName), 2.0);
                 AddWeightedTokens(freqs, Tokenize(record.Category), 1.5);
                 AddWeightedTokens(freqs, Tokenize(record.SubCategory), 1.5);
@@ -95,7 +180,8 @@ namespace GhCopilot.Core.Index
             }
 
             double avgDocLength = totalLength > 0.0 ? totalLength / docCount : 1.0;
-            List<string> distinctQueryTokens = queryTokens.Distinct(StringComparer.Ordinal).ToList();
+            Dictionary<string, double> weightedQueryTerms = BuildWeightedQueryTerms(queryTokens, out bool hasExplicitRevitIntent, out bool hasBimElementIntent);
+            bool corpusHasRevit = corpus.Any(c => c.IsRevitComponent);
 
             var scored = new List<(ComponentRecord Record, double Score)>(docCount);
 
@@ -106,17 +192,29 @@ namespace GhCopilot.Core.Index
                 double dl = docLengths[i];
                 double bm25 = 0.0;
 
-                foreach (string term in distinctQueryTokens)
+                foreach (KeyValuePair<string, double> qTerm in weightedQueryTerms)
                 {
-                    if (!tfMap.TryGetValue(term, out double tf) || tf <= 0.0)
+                    if (!tfMap.TryGetValue(qTerm.Key, out double tf) || tf <= 0.0)
                     {
                         continue;
                     }
 
-                    int df = docFreq.TryGetValue(term, out int dfVal) ? dfVal : 0;
+                    int df = docFreq.TryGetValue(qTerm.Key, out int dfVal) ? dfVal : 0;
                     double idf = Math.Log((docCount - df + 0.5) / (df + 0.5) + 1.0);
                     double denom = tf + K1 * (1.0 - B + B * (dl / avgDocLength));
-                    bm25 += idf * (tf * (K1 + 1.0) / denom);
+                    bm25 += qTerm.Value * idf * (tf * (K1 + 1.0) / denom);
+                }
+
+                if (bm25 > 0.0 && record.IsRevitComponent)
+                {
+                    if (hasExplicitRevitIntent)
+                    {
+                        bm25 *= 2.0;
+                    }
+                    else if (hasBimElementIntent && corpusHasRevit)
+                    {
+                        bm25 *= 1.45;
+                    }
                 }
 
                 if (bm25 > 0.0 && record.IsCompany)
@@ -147,7 +245,25 @@ namespace GhCopilot.Core.Index
                 }
             }
 
-            // Pad with core primitives and company items if fewer than limit scored > 0.
+            // Pad with core Revit foundation primitives when working in Rhino.Inside.Revit, then core primitives and company items.
+            if (selected.Count < limit && corpusHasRevit && (hasExplicitRevitIntent || hasBimElementIntent))
+            {
+                foreach (ComponentRecord record in corpus
+                    .Where(IsCoreRevitPrimitive)
+                    .OrderBy(c => c.ShortId, StringComparer.Ordinal))
+                {
+                    if (selected.Count >= limit)
+                    {
+                        break;
+                    }
+
+                    if (selectedIds.Add(record.ShortId))
+                    {
+                        selected.Add(record);
+                    }
+                }
+            }
+
             if (selected.Count < limit)
             {
                 foreach (ComponentRecord record in corpus
@@ -216,6 +332,66 @@ namespace GhCopilot.Core.Index
             {
                 map[token] = map.TryGetValue(token, out double current) ? current + weight : weight;
             }
+        }
+
+        private static Dictionary<string, double> BuildWeightedQueryTerms(
+            List<string> queryTokens,
+            out bool hasExplicitRevitIntent,
+            out bool hasBimElementIntent)
+        {
+            var terms = new Dictionary<string, double>(StringComparer.Ordinal);
+            hasExplicitRevitIntent = false;
+            hasBimElementIntent = false;
+
+            foreach (string token in queryTokens)
+            {
+                terms[token] = 1.0;
+                if (ExplicitRevitTokens.Contains(token))
+                {
+                    hasExplicitRevitIntent = true;
+                }
+
+                if (BimElementTokens.Contains(token))
+                {
+                    hasBimElementIntent = true;
+                }
+            }
+
+            foreach (string token in queryTokens)
+            {
+                if (!DomainExpansions.TryGetValue(token, out string[]? expansions))
+                {
+                    continue;
+                }
+
+                foreach (string expansion in expansions)
+                {
+                    if (!terms.ContainsKey(expansion))
+                    {
+                        terms[expansion] = ExpansionTermWeight;
+                    }
+                }
+            }
+
+            return terms;
+        }
+
+        private static bool IsCoreRevitPrimitive(ComponentRecord record)
+        {
+            if (!record.IsRevitComponent)
+            {
+                return false;
+            }
+
+            foreach (string name in CoreRevitPrimitiveNames)
+            {
+                if (string.Equals(record.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool IsCorePrimitive(ComponentRecord record)
