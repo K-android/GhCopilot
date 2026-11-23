@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -8,6 +9,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -20,8 +22,68 @@ namespace GhCopilot.Installer
         private const string DefaultModelId = "gemini-2.5-flash";
         private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("GhCopilot.GeminiApiKey.v1");
 
+        private const int RmCchMaxAppName = 255;
+        private const int RmCchMaxSvcName = 63;
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool DeleteFileW(string lpFileName);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RM_UNIQUE_PROCESS
+        {
+            public int dwProcessId;
+            public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+        }
+
+        private enum RM_APP_TYPE
+        {
+            RmUnknownApp = 0,
+            RmMainWindow = 1,
+            RmOtherWindow = 2,
+            RmService = 3,
+            RmExplorer = 4,
+            RmConsole = 5,
+            RmCritical = 1000
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct RM_PROCESS_INFO
+        {
+            public RM_UNIQUE_PROCESS Process;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = RmCchMaxAppName + 1)]
+            public string strAppName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = RmCchMaxSvcName + 1)]
+            public string strServiceShortName;
+            public RM_APP_TYPE ApplicationType;
+            public uint AppStatus;
+            public uint TSSessionId;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bRestartable;
+        }
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmStartSession(out uint pSessionHandle, int dwSessionFlags, string strSessionKey);
+
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmEndSession(uint pSessionHandle);
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmRegisterResources(
+            uint pSessionHandle,
+            uint nFiles,
+            string[] rgsFilenames,
+            uint nApplications,
+            [In] RM_UNIQUE_PROCESS[]? rgApplications,
+            uint nServices,
+            string[]? rgsServiceNames);
+
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmGetList(
+            uint dwSessionHandle,
+            out uint pnProcInfoNeeded,
+            ref uint pnProcInfo,
+            [In, Out] RM_PROCESS_INFO[]? rgAffectedApps,
+            ref uint lpdwRebootReasons);
 
         [STAThread]
         private static int Main(string[] args)
@@ -83,9 +145,23 @@ namespace GhCopilot.Installer
             return Path.Combine(localAppData, "GhCopilot");
         }
 
+        internal static IReadOnlyList<string> GetRunningHostProcesses()
+        {
+            var running = new List<string>();
+            if (Process.GetProcessesByName("Rhino").Length > 0)
+            {
+                running.Add("Rhino 8 (Rhino.exe)");
+            }
+            if (Process.GetProcessesByName("Revit").Length > 0)
+            {
+                running.Add("Autodesk Revit / Rhino.Inside.Revit (Revit.exe)");
+            }
+            return running;
+        }
+
         internal static bool IsRhinoRunning()
         {
-            return Process.GetProcessesByName("Rhino").Length > 0;
+            return GetRunningHostProcesses().Count > 0;
         }
 
         internal static string DetectPreferredRhinoRuntime()
@@ -119,13 +195,12 @@ namespace GhCopilot.Installer
         {
             string packageRoot = GetYakPackageRoot();
             string installDir = GetYakVersionDir();
+            string legacyDir = GetLegacyGhLibrariesDir();
 
             EnsureNoLockedFiles(packageRoot);
+            EnsureNoLockedFiles(legacyDir);
 
-            if (Directory.Exists(packageRoot))
-            {
-                Directory.Delete(packageRoot, recursive: true);
-            }
+            DeleteDirectoryIfExists(packageRoot);
             Directory.CreateDirectory(installDir);
 
             // Extract embedded multi-target Yak package (manifest.yml, net48/, net7.0/).
@@ -171,11 +246,7 @@ namespace GhCopilot.Installer
             ClearMarkOfTheWeb(manifestTxtPath);
 
             // Remove legacy Grasshopper\Libraries\GhCopilot folder to prevent duplicate GH_AssemblyInfo ID warnings.
-            string legacyDir = GetLegacyGhLibrariesDir();
-            if (Directory.Exists(legacyDir))
-            {
-                Directory.Delete(legacyDir, recursive: true);
-            }
+            DeleteDirectoryIfExists(legacyDir);
 
             // Register Rhino 8 PlugIn in HKCU matching Rhino 8's native .NET plug-in schema (root + PlugIn + CommandList).
             string runtimeFolder = string.Equals(preferredRuntime, "net7.0", StringComparison.OrdinalIgnoreCase)
@@ -227,17 +298,11 @@ namespace GhCopilot.Installer
         internal static string UninstallCore()
         {
             string packageRoot = GetYakPackageRoot();
-            EnsureNoLockedFiles(packageRoot);
-            if (Directory.Exists(packageRoot))
-            {
-                Directory.Delete(packageRoot, recursive: true);
-            }
-
             string legacyDir = GetLegacyGhLibrariesDir();
-            if (Directory.Exists(legacyDir))
-            {
-                Directory.Delete(legacyDir, recursive: true);
-            }
+            EnsureNoLockedFiles(packageRoot);
+            EnsureNoLockedFiles(legacyDir);
+            DeleteDirectoryIfExists(packageRoot);
+            DeleteDirectoryIfExists(legacyDir);
 
             string regPath = $@"Software\McNeel\Rhinoceros\8.0\Plug-Ins\{RhinoPlugInId.ToLowerInvariant()}";
             Registry.CurrentUser.DeleteSubKeyTree(regPath, throwOnMissingSubKey: false);
@@ -245,7 +310,7 @@ namespace GhCopilot.Installer
             return "Uninstalled GH Copilot plugin files and Rhino 8 registration.";
         }
 
-        private static void EnsureNoLockedFiles(string directoryPath)
+        private static void DeleteDirectoryIfExists(string directoryPath)
         {
             if (!Directory.Exists(directoryPath))
             {
@@ -256,15 +321,142 @@ namespace GhCopilot.Installer
             {
                 try
                 {
-                    using var fs = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    FileAttributes attrs = File.GetAttributes(filePath);
+                    if ((attrs & FileAttributes.ReadOnly) != 0)
+                    {
+                        File.SetAttributes(filePath, attrs & ~FileAttributes.ReadOnly);
+                    }
                 }
-                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                catch
                 {
-                    throw new InvalidOperationException(
-                        $"Rhino 8 appears to be holding GH Copilot files open ({Path.GetFileName(filePath)}). Close Rhino 8 completely and run Setup again.",
-                        ex);
+                    // Ignore attribute reset failures and let Delete report real IO errors if any.
                 }
             }
+
+            Directory.Delete(directoryPath, recursive: true);
+        }
+
+        private static void EnsureNoLockedFiles(string directoryPath)
+        {
+            if (!Directory.Exists(directoryPath))
+            {
+                return;
+            }
+
+            const int maxAttempts = 5;
+            foreach (string filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
+            {
+                Exception? lastEx = null;
+                bool unlocked = false;
+
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
+                {
+                    try
+                    {
+                        FileAttributes attrs = File.GetAttributes(filePath);
+                        if ((attrs & FileAttributes.ReadOnly) != 0)
+                        {
+                            File.SetAttributes(filePath, attrs & ~FileAttributes.ReadOnly);
+                        }
+
+                        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                        unlocked = true;
+                        break;
+                    }
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                    {
+                        lastEx = ex;
+                        if (attempt + 1 < maxAttempts)
+                        {
+                            Thread.Sleep(400);
+                        }
+                    }
+                }
+
+                if (!unlocked)
+                {
+                    IReadOnlyList<string> lockers = GetLockingProcesses(filePath);
+                    string processDetails = lockers.Count > 0
+                        ? $"Locked by: {string.Join(", ", lockers)}."
+                        : "Check Task Manager for lingering Rhino.exe, Revit.exe (Rhino.Inside.Revit), or Rhino Compute processes.";
+
+                    throw new InvalidOperationException(
+                        $"Cannot overwrite '{Path.GetFileName(filePath)}' because it is open in another process. {processDetails}\n" +
+                        $"Close Rhino 8 and Autodesk Revit completely, wait a couple of seconds, and run Setup again.\n" +
+                        $"File: {filePath}",
+                        lastEx);
+                }
+            }
+        }
+
+        private static IReadOnlyList<string> GetLockingProcesses(string filePath)
+        {
+            var results = new List<string>();
+            uint handle = 0;
+            try
+            {
+                string key = Guid.NewGuid().ToString("N");
+                if (RmStartSession(out handle, 0, key) != 0)
+                {
+                    return results;
+                }
+
+                if (RmRegisterResources(handle, 1, new[] { filePath }, 0, null, 0, null) != 0)
+                {
+                    return results;
+                }
+
+                uint pnProcInfoNeeded = 0;
+                uint pnProcInfo = 0;
+                uint rebootReasons = 0;
+                int res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, null, ref rebootReasons);
+                if (res == 234 && pnProcInfoNeeded > 0) // ERROR_MORE_DATA
+                {
+                    var processInfo = new RM_PROCESS_INFO[pnProcInfoNeeded];
+                    pnProcInfo = pnProcInfoNeeded;
+                    res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, processInfo, ref rebootReasons);
+                    if (res == 0)
+                    {
+                        var seen = new HashSet<int>();
+                        for (int i = 0; i < pnProcInfo; i++)
+                        {
+                            int pid = processInfo[i].Process.dwProcessId;
+                            if (!seen.Add(pid))
+                            {
+                                continue;
+                            }
+
+                            string appName = processInfo[i].strAppName;
+                            if (string.IsNullOrWhiteSpace(appName))
+                            {
+                                try
+                                {
+                                    appName = Process.GetProcessById(pid).ProcessName;
+                                }
+                                catch
+                                {
+                                    appName = "Unknown process";
+                                }
+                            }
+
+                            results.Add($"{appName} (PID {pid})");
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore Restart Manager errors and fall back to generic process guidance.
+            }
+            finally
+            {
+                if (handle != 0)
+                {
+                    try { RmEndSession(handle); } catch { }
+                }
+            }
+
+            return results;
         }
 
         private static void SaveOptionalConfiguration(string? apiKey, string? modelId, string? sharedFolder)
@@ -484,11 +676,12 @@ namespace GhCopilot.Installer
 
         private void OnInstallClicked(object? sender, EventArgs e)
         {
-            if (Program.IsRhinoRunning())
+            IReadOnlyList<string> runningHosts = Program.GetRunningHostProcesses();
+            if (runningHosts.Count > 0)
             {
                 DialogResult confirm = MessageBox.Show(
                     this,
-                    "Rhino 8 appears to be running. Close Rhino before installing/updating so plugin files are not locked.\n\nContinue anyway?",
+                    $"The following host process(es) are currently running and may lock plugin files:\n\n• {string.Join("\n• ", runningHosts)}\n\nClose Rhino 8 and Autodesk Revit before installing/updating.\n\nContinue anyway?",
                     "GH Copilot Setup",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Warning);
