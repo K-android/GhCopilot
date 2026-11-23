@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using GhCopilot.Core.Graph;
 using Rhino;
@@ -12,15 +15,17 @@ namespace GhCopilot.Gh.Canvas
 {
     /// <summary>
     /// Reads privacy-safe scene & viewport metadata (active camera, display mode, units, visible layers,
-    /// object counts, and bounding boxes) from RhinoDoc.ActiveDoc on the Rhino UI thread.
+    /// object counts, bounding boxes, and optional viewport PNG snapshot) from RhinoDoc.ActiveDoc on the Rhino UI thread.
     /// </summary>
     internal static class RhinoViewportInspector
     {
         private const int MaxObjectsToScan = 2000;
         private const int MaxSampleObjects = 25;
         private const int MaxVisibleLayers = 20;
+        private const int MaxCaptureWidth = 560;
+        private const int MaxCaptureHeight = 340;
 
-        public static RhinoViewportSnapshot InspectActiveDoc()
+        public static RhinoViewportSnapshot InspectActiveDoc(bool captureImage = true)
         {
             var snapshot = new RhinoViewportSnapshot();
             try
@@ -137,24 +142,58 @@ namespace GhCopilot.Gh.Canvas
                     snapshot.SampleObjects.Add(s);
                 }
 
-                if (doc.Layers != null)
-                {
-                    foreach (Layer layer in doc.Layers)
+                    if (doc.Layers != null)
                     {
-                        if (layer == null || layer.IsDeleted || !layer.IsVisible) continue;
-                        if (snapshot.VisibleLayers.Count >= MaxVisibleLayers) break;
-                        string layerName = string.IsNullOrWhiteSpace(layer.FullPath) ? layer.Name : layer.FullPath;
-                        int count = layerObjectCounts.TryGetValue(layer.Index, out int cnt) ? cnt : 0;
-                        snapshot.VisibleLayers.Add($"{layerName} ({count})");
+                        foreach (Layer layer in doc.Layers)
+                        {
+                            if (layer == null || layer.IsDeleted || !layer.IsVisible) continue;
+                            if (snapshot.VisibleLayers.Count >= MaxVisibleLayers) break;
+                            string layerName = string.IsNullOrWhiteSpace(layer.FullPath) ? layer.Name : layer.FullPath;
+                            int count = layerObjectCounts.TryGetValue(layer.Index, out int cnt) ? cnt : 0;
+                            snapshot.VisibleLayers.Add($"{layerName} ({count})");
+                        }
+                    }
+
+                    if (captureImage && activeView != null)
+                    {
+                        snapshot.ViewportImageBase64Png = TryCaptureViewPngBase64(activeView);
                     }
                 }
-            }
             catch (Exception)
             {
                 // Best-effort inspection: never fail prompt generation if RhinoDoc/Views throws mid-edit.
             }
 
             return snapshot;
+        }
+
+        private static string? TryCaptureViewPngBase64(RhinoView activeView)
+        {
+            try
+            {
+                Size rawSize = activeView.Size;
+                int srcW = rawSize.Width > 0 ? rawSize.Width : 480;
+                int srcH = rawSize.Height > 0 ? rawSize.Height : 300;
+                double scale = Math.Min((double)MaxCaptureWidth / srcW, (double)MaxCaptureHeight / srcH);
+                if (scale > 1.0) scale = 1.0;
+
+                int w = Math.Max(160, (int)Math.Round(srcW * scale));
+                int h = Math.Max(120, (int)Math.Round(srcH * scale));
+
+                using Bitmap? bmp = activeView.CaptureToBitmap(new Size(w, h), grid: true, worldAxes: true, cplaneAxes: false);
+                if (bmp is null)
+                {
+                    return null;
+                }
+
+                using var ms = new MemoryStream();
+                bmp.Save(ms, ImageFormat.Png);
+                return Convert.ToBase64String(ms.ToArray());
+            }
+            catch (Exception)
+            {
+                return null;
+            }
         }
 
         private static string FormatObjectSample(string typeName, string? layerName, string? objectName, BoundingBox bounds, bool isSelected)

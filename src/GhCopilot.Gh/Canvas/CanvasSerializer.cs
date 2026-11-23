@@ -303,6 +303,20 @@ namespace GhCopilot.Gh.Canvas
                     Nickname = string.IsNullOrWhiteSpace(panel.NickName) ? null : panel.NickName
                 };
             }
+            else if (GhCopilot.Gh.Script.PythonScriptSpawner.IsPythonScriptObject(obj))
+            {
+                string? code = GhCopilot.Gh.Script.PythonScriptSpawner.TryExtractCode(obj);
+                if (!string.IsNullOrWhiteSpace(code))
+                {
+                    const int maxCodeLength = 4000;
+                    string trimmedCode = code!.Length > maxCodeLength ? code.Substring(0, maxCodeLength) + "\n# ..." : code;
+                    settings = new NodeSettings
+                    {
+                        Text = trimmedCode,
+                        Nickname = string.IsNullOrWhiteSpace(obj.NickName) ? null : obj.NickName
+                    };
+                }
+            }
             else if (!string.IsNullOrWhiteSpace(obj.NickName) &&
                      !string.Equals(obj.NickName, obj.Name, StringComparison.OrdinalIgnoreCase))
             {

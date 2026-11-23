@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using GhCopilot.Core.Llm;
 
 namespace GhCopilot.Core.Host
 {
@@ -12,6 +13,12 @@ namespace GhCopilot.Core.Host
         private static readonly object SyncLock = new object();
         private static IGrasshopperHostBridge? _grasshopperBridge;
         private static IRhinoHostBridge? _rhinoBridge;
+
+        /// <summary>
+        /// Unified conversation session shared across Rhino Direct and Grasshopper hosts
+        /// so planning, schematic approvals, and follow-up edits preserve full context.
+        /// </summary>
+        public static ChatSession SharedSession { get; } = new ChatSession();
 
         /// <summary>
         /// Raised after the Grasshopper host bridge registers during PriorityLoad.
@@ -94,6 +101,7 @@ namespace GhCopilot.Core.Host
                 _grasshopperBridge = null;
                 _rhinoBridge = null;
             }
+            SharedSession.Clear();
         }
 
         /// <summary>

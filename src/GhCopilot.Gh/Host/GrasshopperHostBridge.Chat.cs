@@ -13,6 +13,7 @@ using GhCopilot.Gh.Canvas;
 using GhCopilot.Gh.Index;
 using Grasshopper;
 using Grasshopper.Kernel;
+using Rhino;
 
 namespace GhCopilot.Gh.Host
 {
@@ -22,7 +23,7 @@ namespace GhCopilot.Gh.Host
         private ChatTurnTransaction? _chatPreview;
         private readonly List<Guid> _previousChatScope = new List<Guid>();
         private GH_Document? _chatDocument;
-        public ChatSession Session { get; } = new ChatSession();
+        public ChatSession Session => CopilotHostRegistry.SharedSession;
         public event Action<int>? TokenEstimateChanged;
         public event Action<string>? ProgressStageChanged;
 
@@ -55,7 +56,11 @@ namespace GhCopilot.Gh.Host
             if (useRhinoSelection) user += "\nExplicit permission: use my currently selected Rhino objects as inputs for this turn.";
             try
             {
-                if (HasActivePreview) return FailureResponse("Accept or reject the pending turn before sending another message.");
+                if (HasActivePreview && !AcceptActivePreview())
+                {
+                    return FailureResponse("Accept or reject the pending turn before sending another message.");
+                }
+
                 if (string.IsNullOrWhiteSpace(prompt) && action == ChatAction.Message)
                     return FailureResponse("Enter a message first. Supply missing inputs, or explicitly enable Use Rhino Selection.");
 
@@ -67,18 +72,23 @@ namespace GhCopilot.Gh.Host
                 }
 
                 string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
-                bool isConversationalFastPath = action == ChatAction.Message && !useRhinoSelection && ChatPromptBuilder.IsConversationalOnlyPrompt(prompt);
+                bool approvingPendingPlan = !string.IsNullOrWhiteSpace(Session.PendingPlanSummary) &&
+                                            ChatPromptBuilder.IsApprovalOrBuildConfirmation(prompt);
+                bool isConversationalFastPath = !approvingPendingPlan &&
+                                                action == ChatAction.Message &&
+                                                !useRhinoSelection &&
+                                                ChatPromptBuilder.IsConversationalOnlyPrompt(prompt);
 
                 if (isConversationalFastPath)
                 {
-                    ReportStage("💭 Thinking: inspecting workspace & replying directly...");
+                    ReportStage("💭 Inspecting workspace & live viewport screenshot...");
                     (CanvasSnapshot readOnlySnapshot, RhinoViewportSnapshot viewportContext) =
                         await TryCaptureOptionalSnapshotAsync().ConfigureAwait(false);
                     string convSystem = ChatPromptBuilder.BuildConversationalSystem();
                     string convPayload = ChatPromptBuilder.BuildConversationalPayload(Session, readOnlySnapshot, user, viewportContext);
                     tokens = EstimateSend(convSystem, convPayload, null);
                     PayloadAuditLogger.LogSentPayload("ChatConversational", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, convSystem, convPayload);
-                    ReportStage($"✉️ Asking {settings.ModelId} for a direct reply...");
+                    ReportStage($"✉️ Asking {settings.ModelId} (with live viewport view)...");
                     string reply = await _geminiClient.GenerateTextAsync(
                         apiKey,
                         settings.ModelId,
@@ -87,18 +97,64 @@ namespace GhCopilot.Gh.Host
                         TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
                         cancellationToken,
                         settings.Provider,
-                        endpoint).ConfigureAwait(false);
+                        endpoint,
+                        viewportContext.ViewportImageBase64Png).ConfigureAwait(false);
+                    string viewSummary = RhinoViewportSnapshot.BuildDiffSummary(null, viewportContext);
+                    Session.LastViewportVerification = viewSummary;
                     return FinishChat(user, new CopilotGenerationResponse
                     {
                         IsSuccess = true,
                         Explanation = reply,
                         StatusLine = "Replied (no canvas changes).",
-                        EstimatedInputTokens = tokens
+                        EstimatedInputTokens = tokens,
+                        ViewportImageBase64Png = viewportContext.ViewportImageBase64Png,
+                        ViewportVerificationSummary = viewSummary
                     });
                 }
 
+                if (action == ChatAction.Message &&
+                    !useRhinoSelection &&
+                    ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, Session, settings.PlanFirstMode))
+                {
+                    ReportStage("📐 Inspecting canvas & Rhino viewport to draft plan + diagram...");
+                    (CanvasSnapshot readOnlySnapshot, RhinoViewportSnapshot viewportContext) =
+                        await TryCaptureOptionalSnapshotAsync().ConfigureAwait(false);
+                    string planSystem = ChatPromptBuilder.BuildPlanAndClarifySystem(CopilotWorkMode.Grasshopper);
+                    string planPayload = ChatPromptBuilder.BuildConversationalPayload(Session, readOnlySnapshot, user, viewportContext);
+                    tokens = EstimateSend(planSystem, planPayload, null);
+                    PayloadAuditLogger.LogSentPayload("ChatPlanFirst", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, planSystem, planPayload);
+                    ReportStage($"🧠 Designing plan & schematic diagram with {settings.ModelId}...");
+                    string planReply = await _geminiClient.GenerateTextAsync(
+                        apiKey,
+                        settings.ModelId,
+                        planSystem,
+                        planPayload,
+                        TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
+                        cancellationToken,
+                        settings.Provider,
+                        endpoint,
+                        viewportContext.ViewportImageBase64Png).ConfigureAwait(false);
+                    Session.PendingPlanSummary = planReply;
+                    string viewSummary = RhinoViewportSnapshot.BuildDiffSummary(null, viewportContext);
+                    Session.LastViewportVerification = viewSummary;
+                    return FinishChat(user, new CopilotGenerationResponse
+                    {
+                        IsSuccess = true,
+                        IsPlanProposal = true,
+                        Explanation = planReply,
+                        StatusLine = "Plan & diagram ready — tap Approve & Build or reply to refine.",
+                        EstimatedInputTokens = tokens,
+                        ViewportImageBase64Png = viewportContext.ViewportImageBase64Png,
+                        ViewportVerificationSummary = viewSummary
+                    });
+                }
+
+                string effectiveUser = action == ChatAction.Message
+                    ? ChatPromptBuilder.BuildEffectiveExecutionPrompt(user, Session)
+                    : user;
+
                 ReportStage("🔭 Inspecting Rhino viewport & active Grasshopper definition...");
-                bool forceWholeCanvas = ChatPromptBuilder.RequestsWholeCanvasInspection(prompt);
+                bool forceWholeCanvas = ChatPromptBuilder.RequestsWholeCanvasInspection(effectiveUser);
                 IReadOnlyList<Guid>? explicitFallback = forceWholeCanvas ? Array.Empty<Guid>() : null;
                 bool selectionFirst = !forceWholeCanvas;
                 IndexStore store = EnsureIndexLoaded();
@@ -112,7 +168,7 @@ namespace GhCopilot.Gh.Host
                     Session.LastSpawnedNodeIds.RemoveAll(id => doc.FindObject(id, false) == null);
                     return (
                         CaptureChatSnapshot(doc, store, explicitFallback, selectionFirst: selectionFirst, fallbackToAllCanvasObjects: true),
-                        RhinoViewportInspector.InspectActiveDoc());
+                        RhinoViewportInspector.InspectActiveDoc(captureImage: true));
                 }).ConfigureAwait(false);
 
                 if (action == ChatAction.SaveRecipe)
@@ -133,7 +189,8 @@ namespace GhCopilot.Gh.Host
                     return FailureResponse("No Grasshopper components or visible Rhino viewport objects found to explain.");
 
                 ReportStage("🔍 Retrieving matching Grasshopper components & saved recipes...");
-                IReadOnlyList<ComponentRecord> shortlist = BuildShortlistForFix(store, snapshot, user);
+                string retrievalQuery = ChatPromptBuilder.BuildRetrievalQuery(Session, effectiveUser);
+                IReadOnlyList<ComponentRecord> shortlist = BuildShortlistForFix(store, snapshot, retrievalQuery);
                 ReportStage($"🔧 Hydrating {shortlist.Count} candidate component pins...");
                 await UiThread.MutateActiveDocumentAsync(doc => { EnsureChatDocument(doc); ParamHydrator.HydrateShortlist(shortlist); return true; }).ConfigureAwait(false);
 
@@ -150,7 +207,7 @@ namespace GhCopilot.Gh.Host
                 IReadOnlyList<RecipeRecord> matchingRecipes = !patchOnly && action == ChatAction.Message
                     ? RecipeStore.RetrieveMatchingRecipes(
                         RecipeStore.LoadAll(sharedLibraryFolder: settings.SharedLibraryFolder),
-                        prompt,
+                        retrievalQuery,
                         maxRecipes: 2)
                     : Array.Empty<RecipeRecord>();
 
@@ -159,7 +216,7 @@ namespace GhCopilot.Gh.Host
                     : ChatPromptBuilder.BuildSystem(shortlist, patchOnly);
                 system += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
                 JsonElement schema = patchOnly ? GraphPatchSchema.Build() : SchemaBuilder.BuildResponseJsonSchema(shortlist);
-                string basePayload = ChatPromptBuilder.Build(Session, snapshot, null, user, shortlist, matchingRecipes, viewportSnapshot);
+                string basePayload = ChatPromptBuilder.Build(Session, snapshot, null, effectiveUser, shortlist, matchingRecipes, viewportSnapshot);
 
                 if (action == ChatAction.ExplainSelection)
                 {
@@ -169,20 +226,25 @@ namespace GhCopilot.Gh.Host
                     tokens = EstimateSend(system, basePayload, null);
                     PayloadAuditLogger.LogSentPayload("ChatScopedSnapshot", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, system, basePayload);
                     string text = await _geminiClient.GenerateTextAsync(apiKey, settings.ModelId, system, basePayload,
-                        TimeSpan.FromSeconds(settings.RequestTimeoutSeconds), cancellationToken, settings.Provider, endpoint).ConfigureAwait(false);
+                        TimeSpan.FromSeconds(settings.RequestTimeoutSeconds), cancellationToken, settings.Provider, endpoint,
+                        viewportSnapshot.ViewportImageBase64Png).ConfigureAwait(false);
+                    string explainViewSummary = RhinoViewportSnapshot.BuildDiffSummary(null, viewportSnapshot);
+                    Session.LastViewportVerification = explainViewSummary;
                     return FinishChat(user, new CopilotGenerationResponse
                     {
                         IsSuccess = true,
                         Explanation = text,
                         StatusLine = snapshot.Nodes.Count > 0 ? "Definition & viewport explained." : "Rhino viewport explained.",
-                        EstimatedInputTokens = tokens
+                        EstimatedInputTokens = tokens,
+                        ViewportImageBase64Png = viewportSnapshot.ViewportImageBase64Png,
+                        ViewportVerificationSummary = explainViewSummary
                     });
                 }
 
                 (bool validOutput, GraphPatch? patch, GraphSpec? graph, string explanation, List<string> validationErrors, int initialTokens) =
                     await GenerateAndValidateChatTurnAsync(
                         apiKey, settings, endpoint, system, basePayload, schema, patchOnly, action, useRhinoSelection,
-                        snapshot, shortlist, cancellationToken).ConfigureAwait(false);
+                        snapshot, shortlist, viewportSnapshot.ViewportImageBase64Png, cancellationToken).ConfigureAwait(false);
                 tokens += initialTokens;
 
                 if (!validOutput)
@@ -243,7 +305,7 @@ namespace GhCopilot.Gh.Host
                         EnsureChatDocument(doc);
                         return CaptureChatSnapshot(doc, store, scope, selectionFirst: false);
                     }).ConfigureAwait(false);
-                    string repairUser = "Fix only the runtime errors from this turn using patch ops; all required inputs have been checked. Original request: " + user;
+                    string repairUser = "Fix only the runtime errors from this turn using patch ops; all required inputs have been checked. Original request: " + effectiveUser;
                     string repairSystem = ChatPromptBuilder.BuildSystem(shortlist, true);
                     repairSystem += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
                     string repairPayload = ChatPromptBuilder.Build(Session, repairSnapshot, state.RuntimeMessages, repairUser, shortlist);
@@ -278,9 +340,18 @@ namespace GhCopilot.Gh.Host
                     repairNotes.Add($"Auto-repair {repairs}: {fix.Explanation}");
                 }
 
+                ReportStage("👁️ Capturing live Rhino viewport to verify rendered geometry...");
+                RhinoViewportSnapshot afterViewport = await CaptureViewportAfterRenderAsync().ConfigureAwait(false);
+                string afterSummary = RhinoViewportSnapshot.BuildDiffSummary(viewportSnapshot, afterViewport);
+
                 Session.LastSpawnedNodeIds.Clear();
                 Session.LastSpawnedNodeIds.AddRange(scope);
                 foreach (Guid id in transaction!.AddedNodeIds) Session.SpawnedNodeIds.Add(id);
+                Session.PendingPlanSummary = string.Empty;
+                Session.HasBuiltInCurrentSession = true;
+                Session.LastExecutedSummary = explanation;
+                Session.LastViewportVerification = afterSummary;
+
                 lock (_previewLock) _chatPreview = transaction;
                 transaction = null; // ownership passes to Accept/Reject
                 OnPreviewStateChanged();
@@ -289,8 +360,10 @@ namespace GhCopilot.Gh.Host
                 result.NodeCount = scope.Count;
                 result.AttemptsUsed = 1 + repairs;
                 result.EstimatedInputTokens = tokens;
+                result.ViewportImageBase64Png = afterViewport.ViewportImageBase64Png;
+                result.ViewportVerificationSummary = afterSummary;
                 result.Explanation = explanation + (repairNotes.Count > 0 ? "\n" + string.Join("\n", repairNotes) : "");
-                result.StatusLine = $"Turn preview ready; Accept or Reject. Auto-repair attempts: {repairs}/3.";
+                result.StatusLine = $"Preview ready on canvas; Accept, Reject, or text a follow-up edit. Auto-repair attempts: {repairs}/3.";
                 if (state.MissingInputs.Count > 0 || state.InvalidInputs.Count > 0) result.Explanation += "\n" + InputResponse(state).StatusLine;
                 if (repairs == 3 && state.RuntimeMessages.Any(m => m.StartsWith("[Error]", StringComparison.Ordinal)))
                     result.Explanation += "\nStopped after 3 repair attempts. Remaining errors are shown below.";
@@ -322,6 +395,7 @@ namespace GhCopilot.Gh.Host
                 bool useRhinoSelection,
                 CanvasSnapshot snapshot,
                 IReadOnlyList<ComponentRecord> shortlist,
+                string? viewportImageBase64Png,
                 CancellationToken cancellationToken)
         {
             string schemaRaw = schema.GetRawText();
@@ -362,7 +436,8 @@ namespace GhCopilot.Gh.Host
                     TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
                     cancellationToken,
                     settings.Provider,
-                    endpoint).ConfigureAwait(false);
+                    endpoint,
+                    attempt == 0 ? viewportImageBase64Png : null).ConfigureAwait(false);
 
                 ReportStage("✅ Validating component references, pins, and wire topology...");
 
@@ -446,7 +521,7 @@ namespace GhCopilot.Gh.Host
             var tcs = new TaskCompletionSource<(CanvasSnapshot, RhinoViewportSnapshot)>(TaskCreationOptions.RunContinuationsAsynchronously);
             UiThread.InvokeOnUi(() =>
             {
-                RhinoViewportSnapshot viewport = RhinoViewportInspector.InspectActiveDoc();
+                RhinoViewportSnapshot viewport = RhinoViewportInspector.InspectActiveDoc(captureImage: true);
                 try
                 {
                     GH_Document? doc = Instances.ActiveCanvas?.Document;
@@ -462,6 +537,24 @@ namespace GhCopilot.Gh.Host
                 catch (Exception)
                 {
                     tcs.TrySetResult((new CanvasSnapshot(), viewport));
+                }
+            });
+            return tcs.Task;
+        }
+
+        private static Task<RhinoViewportSnapshot> CaptureViewportAfterRenderAsync()
+        {
+            var tcs = new TaskCompletionSource<RhinoViewportSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+            UiThread.InvokeOnUi(() =>
+            {
+                try
+                {
+                    RhinoDoc.ActiveDoc?.Views?.Redraw();
+                    tcs.TrySetResult(RhinoViewportInspector.InspectActiveDoc(captureImage: true));
+                }
+                catch (Exception)
+                {
+                    tcs.TrySetResult(new RhinoViewportSnapshot());
                 }
             });
             return tcs.Task;

@@ -294,6 +294,78 @@ namespace GhCopilot.Gh.Script
             component.Params.OnParametersChanged();
         }
 
+        public static bool IsPythonScriptObject(IGH_DocumentObject? obj)
+        {
+            if (obj is null) return false;
+            string name = obj.Name ?? string.Empty;
+            string fullType = obj.GetType().FullName ?? string.Empty;
+            return name.IndexOf("Python", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fullType.IndexOf("RhinoCode", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fullType.IndexOf("Python", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static string? TryExtractCode(IGH_DocumentObject? obj)
+        {
+            if (obj is null) return null;
+
+            string? direct = TryGetCodeViaReflection(obj);
+            if (!string.IsNullOrWhiteSpace(direct)) return direct;
+
+            foreach (string nestedPropName in new[] { "Script", "Document", "CodeObject" })
+            {
+                PropertyInfo? nestedProp = obj.GetType().GetProperty(nestedPropName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                object? nested = nestedProp?.GetValue(obj);
+                string? nestedCode = nested != null ? TryGetCodeViaReflection(nested) : null;
+                if (!string.IsNullOrWhiteSpace(nestedCode)) return nestedCode;
+            }
+
+            try
+            {
+                var archive = new GH_Archive();
+                archive.CreateNewRoot(true);
+                if (archive.AppendObject(obj, "Object"))
+                {
+                    XDocument xdoc = XDocument.Parse(archive.Serialize_Xml());
+                    foreach (XElement itemEl in xdoc.Descendants("item"))
+                    {
+                        string? itemName = itemEl.Attribute("name")?.Value;
+                        if (itemName != null && CodeMemberNames.Contains(itemName, StringComparer.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(itemEl.Value))
+                        {
+                            return itemEl.Value;
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Best-effort extraction.
+            }
+
+            return null;
+        }
+
+        public static bool TryUpdateCode(IGH_DocumentObject? obj, string code)
+        {
+            if (obj is null || string.IsNullOrWhiteSpace(code)) return false;
+            return TryInjectCode(obj, code, new List<string>());
+        }
+
+        private static string? TryGetCodeViaReflection(object target)
+        {
+            Type type = target.GetType();
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            foreach (string propName in CodeMemberNames)
+            {
+                PropertyInfo? prop = type.GetProperty(propName, flags);
+                if (prop != null && prop.CanRead && prop.PropertyType == typeof(string))
+                {
+                    string? val = prop.GetValue(target) as string;
+                    if (!string.IsNullOrWhiteSpace(val)) return val;
+                }
+            }
+            return null;
+        }
+
         private static bool TryInjectCode(IGH_DocumentObject instance, string code, List<string> warnings)
         {
             if (TrySetCodeViaReflection(instance, code))

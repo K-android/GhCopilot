@@ -283,6 +283,10 @@ namespace GhCopilot.Core.Graph
         private static bool IsSlider(ComponentRecord record) =>
             string.Equals(record.Name, "Number Slider", StringComparison.OrdinalIgnoreCase);
 
+        private static bool IsPythonScript(ComponentRecord record) =>
+            record.Name != null &&
+            record.Name.IndexOf("Python", StringComparison.OrdinalIgnoreCase) >= 0;
+
         private static string? ValidateSettings(StateNode node, NodeSettings? supplied, bool requireSettings)
         {
             if (supplied == null) return requireSettings ? "Settings must not be null." : null;
@@ -292,8 +296,15 @@ namespace GhCopilot.Core.Graph
             if (!numeric && !modifiers && supplied.Text == null && supplied.Nickname == null)
                 return "Settings must contain at least one change.";
             if (numeric && !IsSlider(node.Record)) return "Numeric settings are allowed only on Number Slider nodes.";
-            if (supplied.Text != null && !string.Equals(node.Record.Name, "Panel", StringComparison.OrdinalIgnoreCase))
-                return "Text is allowed only on Panel nodes.";
+            bool isPanel = string.Equals(node.Record.Name, "Panel", StringComparison.OrdinalIgnoreCase);
+            bool isPython = IsPythonScript(node.Record);
+            if (supplied.Text != null && !isPanel && !isPython)
+                return "Text is allowed only on Panel or Python Script nodes.";
+            if (supplied.Text != null && isPython)
+            {
+                string? scriptError = GraphValidator.ValidateScriptCodeOnly(supplied.Text);
+                if (scriptError != null) return scriptError;
+            }
             if (supplied.Nickname != null && string.IsNullOrWhiteSpace(supplied.Nickname)) return "Nickname must not be blank.";
 
             NodeSettings settings = node.Settings;

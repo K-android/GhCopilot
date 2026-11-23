@@ -284,7 +284,8 @@ namespace GhCopilot.Installer
                               $"  \"modelId\": \"{EscapeJson(resolvedModel)}\",\n" +
                               $"  \"sharedLibraryFolder\": \"{EscapeJson(resolvedFolder)}\",\n" +
                               "  \"sendCanvasData\": false,\n" +
-                              "  \"requestTimeoutSeconds\": 45\n" +
+                              "  \"planFirstMode\": true,\n" +
+                              "  \"requestTimeoutSeconds\": 180\n" +
                               "}\n";
                 File.WriteAllText(settingsFile, json, Encoding.UTF8);
             }

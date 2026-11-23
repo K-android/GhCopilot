@@ -173,6 +173,18 @@ namespace GhCopilot.Core.Llm
                 }
             }
 
+            if (!string.IsNullOrWhiteSpace(session.PendingPlanSummary))
+            {
+                sb.AppendLine("APPROVED / PENDING PLAN CONTEXT:");
+                sb.AppendLine(RedactGuids(session.PendingPlanSummary));
+            }
+
+            if (!string.IsNullOrWhiteSpace(session.LastViewportVerification))
+            {
+                sb.AppendLine("LAST VIEWPORT VERIFICATION:");
+                sb.AppendLine(RedactGuids(session.LastViewportVerification));
+            }
+
             sb.AppendLine("NEW USER MESSAGE:");
             sb.Append(newUser.Trim());
             return sb.ToString();

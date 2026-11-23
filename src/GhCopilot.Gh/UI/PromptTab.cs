@@ -8,36 +8,29 @@ using Eto.Forms;
 using GhCopilot.Core;
 using GhCopilot.Core.Host;
 using GhCopilot.Core.Llm;
+using GhCopilot.Core.Settings;
 using Rhino;
 
 namespace GhCopilot.UI
 {
     /// <summary>
-    /// Messaging-style chat workspace supporting Direct Rhino 8 Mode (no Grasshopper required),
-    /// Grasshopper parametric generation, live AI thoughts/ETA indicator, dynamic starter chips,
-    /// and collapsible diagnostics drawer.
+    /// WhatsApp-style chat workspace supporting Plan-First architectural collaboration (questions + schematic
+    /// diagrams + approval), Direct Rhino 8 Mode, Grasshopper parametric mode, live viewport vision, and ETA.
     /// </summary>
     internal sealed class PromptTab : Panel
     {
-        private const string WelcomePlaceholder =
-            "Welcome to GH Copilot!\n\n" +
-            "• Rhino Direct mode works right away without opening Grasshopper — create boxes/spheres/curves, move/rotate/array, manage layers & colors, and control viewports.\n" +
-            "• Grasshopper mode inspects open .gh definitions, builds parametric graphs, fixes errors, and runs Python 3 scripts.\n" +
-            "• Auto mode chooses Rhino Direct or Grasshopper automatically from your prompt and open workspace.\n\n" +
-            "Tip: Press Ctrl+Enter to send.";
-
-        private static readonly string[] RhinoChipLabels = { "Create Box", "Array & Color", "Inspect Scene" };
+        private static readonly string[] RhinoChipLabels = { "Plan Pavilion", "Box + Zoom", "Inspect Scene" };
         private static readonly string[] RhinoChipTooltips =
         {
-            "Insert sample prompt: create an emerald box directly in Rhino and zoom extents",
-            "Insert sample prompt: array 5 spheres linearly onto a new layer",
-            "Insert sample prompt: inspect current Rhino viewport objects, layers, and camera"
+            "Collaborate on a plan + diagram first, then build directly in Rhino 8",
+            "Create a 20x20x10 emerald box directly in Rhino and zoom extents",
+            "Inspect current Rhino viewport screenshot, objects, layers, and camera"
         };
         private static readonly string[] RhinoChipPrompts =
         {
+            "Design a minimalist pavilion canopy with columns and roof slab in Rhino",
             "Create a 20x20x10 box at the origin, color it emerald green, and zoom extents",
-            "Create a linear array of 5 spheres with radius 3 spaced 10 units apart on X on layer Spheres",
-            "What objects, layers, and camera settings are currently in my Rhino viewport?"
+            "What do you see in my live Rhino viewport right now?"
         };
 
         private static readonly string[] GhChipLabels = { "Circle + Slider", "Attractor Grid", "Spiral Tower" };
@@ -58,6 +51,10 @@ namespace GhCopilot.UI
         private readonly Button _modeAutoButton;
         private readonly Button _modeRhinoButton;
         private readonly Button _modeGhButton;
+        private readonly WhatsAppChatControl _chatControl;
+        private readonly Panel _approvalCard;
+        private readonly Button _approveBuildButton;
+        private readonly Button _verifyViewportButton;
         private readonly TextArea _promptBox;
         private readonly Button _sendButton;
         private readonly Button _explainButton;
@@ -70,6 +67,7 @@ namespace GhCopilot.UI
         private readonly Button _chipOne;
         private readonly Button _chipTwo;
         private readonly Button _chipThree;
+        private readonly CheckBox _planFirstCheck;
         private readonly CheckBox _useRhinoSelection;
         private readonly Panel _thinkingCard;
         private readonly Label _thinkingStageLabel;
@@ -78,18 +76,19 @@ namespace GhCopilot.UI
         private readonly ProgressBar _progressBar;
         private readonly Label _statusLabel;
         private readonly Label _tokenEstimateLabel;
-        private readonly TextArea _transcriptBox;
         private readonly Button _diagnosticsToggle;
         private readonly Panel _diagnosticsBody;
         private readonly TextArea _warningsBox;
 
         private CopilotWorkMode _selectedMode = CopilotWorkMode.Auto;
+        private CopilotWorkMode? _pendingPlanTargetMode;
+        private CopilotWorkMode? _lastBuiltMode;
         private CancellationTokenSource? _activeCts;
         private UITimer? _etaTimer;
         private readonly Stopwatch _turnStopwatch = new Stopwatch();
         private double _expectedDurationSeconds = 9.0;
-        private double _emaQuickTurnSeconds = 3.5;
-        private double _emaGraphTurnSeconds = 11.0;
+        private double _emaQuickTurnSeconds = 4.0;
+        private double _emaGraphTurnSeconds = 12.0;
         private readonly List<string> _thoughtSteps = new List<string>();
         private string _latestThought = string.Empty;
         private bool _hasTranscriptEntries;
@@ -99,6 +98,7 @@ namespace GhCopilot.UI
         {
             _previewBar = previewBar ?? throw new ArgumentNullException(nameof(previewBar));
             BackgroundColor = CopilotTheme.CanvasBg;
+            AppSettings initialSettings = AppSettings.Load();
 
             // Mode selector (Auto | Rhino Direct | Grasshopper)
             _modeAutoButton = CreateCompactModeButton("Auto", "Automatically pick Rhino Direct or Grasshopper based on your prompt and open workspace");
@@ -119,15 +119,9 @@ namespace GhCopilot.UI
             modeRow.EndHorizontal();
             Panel modeCard = CopilotTheme.CreateCard(modeRow, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 4);
 
-            _transcriptBox = new TextArea
-            {
-                ReadOnly = true,
-                Wrap = true,
-                Height = 155,
-                Text = WelcomePlaceholder
-            };
-            CopilotTheme.StyleTextArea(_transcriptBox);
-            _transcriptBox.TextColor = CopilotTheme.TextSecondary;
+            // WhatsApp-style graphical chat control
+            _chatControl = new WhatsAppChatControl { Height = 170 };
+            _chatControl.StatusHintRequested += (_, hint) => SetStatus(hint, CopilotTheme.AccentCyan);
 
             _newChatButton = CopilotTheme.CreateSecondaryButton("+ New Chat", "Clear chat history and start fresh (keeps Rhino & canvas objects)");
             _newChatButton.Click += OnNewChatClicked;
@@ -157,11 +151,11 @@ namespace GhCopilot.UI
             };
             transcriptCardContent.BeginVertical();
             transcriptCardContent.Add(transcriptHeader);
-            transcriptCardContent.Add(_transcriptBox, yscale: true);
+            transcriptCardContent.Add(_chatControl, yscale: true);
             transcriptCardContent.EndVertical();
-            Panel transcriptCard = CopilotTheme.CreateCard(transcriptCardContent, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 8);
+            Panel transcriptCard = CopilotTheme.CreateCard(transcriptCardContent, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 6);
 
-            // Live AI Processing / Thoughts / ETA card (shown only while a turn is running)
+            // Live AI Processing / Thoughts / ETA card (shown while a turn is running)
             Panel aiWorkingBadge = CopilotTheme.CreateBadge(
                 out _,
                 "✦ AI THINKING",
@@ -207,14 +201,32 @@ namespace GhCopilot.UI
             _thinkingCard = CopilotTheme.CreateCard(thinkingContent, CopilotTheme.AccentCyan, CopilotTheme.SurfaceElevated, padding: 8);
             _thinkingCard.Visible = false;
 
+            // Plan Approval & Viewport Check bar (contextual: Approve Plan / Verify Live Viewport)
+            _approveBuildButton = CopilotTheme.CreatePrimaryButton(
+                "✓ Approve & Build",
+                "Approve the proposed plan & schematic and build it in Rhino / Grasshopper now");
+            _approveBuildButton.MinimumSize = new Size(92, 26);
+            _approveBuildButton.Click += OnApproveBuildClicked;
+
+            _verifyViewportButton = CopilotTheme.CreateChipButton(
+                "👁️ Verify Viewport",
+                "Capture the live Rhino 8 viewport screenshot and ask Copilot to inspect it");
+            _verifyViewportButton.MinimumSize = new Size(92, 26);
+            _verifyViewportButton.Click += OnVerifyViewportClicked;
+
+            var approvalRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
+            approvalRow.AddRow(_approveBuildButton, _verifyViewportButton);
+            _approvalCard = CopilotTheme.CreateCard(approvalRow, CopilotTheme.AccentCyan, CopilotTheme.SurfaceElevated, padding: 5);
+            _approvalCard.Visible = false;
+
             // Context-aware starter prompt chips (shown only before user types or sends)
-            _chipOne = CopilotTheme.CreateChipButton("Circle + Slider");
+            _chipOne = CopilotTheme.CreateChipButton("Plan Pavilion");
             _chipOne.Click += (_, __) => PopulatePromptForChip(0);
 
-            _chipTwo = CopilotTheme.CreateChipButton("Attractor Grid");
+            _chipTwo = CopilotTheme.CreateChipButton("Box + Zoom");
             _chipTwo.Click += (_, __) => PopulatePromptForChip(1);
 
-            _chipThree = CopilotTheme.CreateChipButton("Spiral Tower");
+            _chipThree = CopilotTheme.CreateChipButton("Inspect Scene");
             _chipThree.Click += (_, __) => PopulatePromptForChip(2);
 
             var chipsRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
@@ -246,12 +258,21 @@ namespace GhCopilot.UI
             _promptBox = new TextArea
             {
                 Text = string.Empty,
-                Height = 56,
+                Height = 52,
                 Wrap = true
             };
             CopilotTheme.StyleTextArea(_promptBox);
             _promptBox.KeyDown += OnPromptKeyDown;
             _promptBox.TextChanged += (_, __) => UpdateStarterChipsVisibility();
+
+            _planFirstCheck = new CheckBox
+            {
+                Text = "Plan First",
+                Checked = initialSettings.PlanFirstMode,
+                ToolTip = "Discuss the plan, view schematic diagrams, and confirm requirements before building"
+            };
+            CopilotTheme.StyleCheckBox(_planFirstCheck);
+            _planFirstCheck.CheckedChanged += OnPlanFirstToggled;
 
             _useRhinoSelection = new CheckBox
             {
@@ -261,24 +282,30 @@ namespace GhCopilot.UI
             };
             CopilotTheme.StyleCheckBox(_useRhinoSelection);
 
-            _cancelButton = CopilotTheme.CreateDangerButton("Stop", "Abort the active request and roll back any pending edits");
+            _cancelButton = CopilotTheme.CreateDangerButton("Stop", "Abort the active request");
             _cancelButton.Enabled = false;
             _cancelButton.Click += OnCancelClicked;
 
             _sendButton = CopilotTheme.CreatePrimaryButton("Send ➤", "Send message to GH Copilot (Ctrl+Enter)");
             _sendButton.Click += OnSendClicked;
 
+            var optionsRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(10, 2) };
+            optionsRow.BeginHorizontal();
+            optionsRow.Add(_planFirstCheck, xscale: false);
+            optionsRow.Add(_useRhinoSelection, xscale: true);
+            optionsRow.EndHorizontal();
+
             var composerFooter = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
             composerFooter.BeginHorizontal();
-            composerFooter.Add(_useRhinoSelection, xscale: true);
+            composerFooter.Add(CopilotTheme.CreateLabel("Ctrl+Enter to send", CopilotTheme.TextMuted, CopilotTheme.SmallFont()), xscale: true);
             composerFooter.Add(_cancelButton, xscale: false);
             composerFooter.Add(_sendButton, xscale: false);
             composerFooter.EndHorizontal();
 
-            var composerContent = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 6) };
+            var composerContent = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 5) };
             composerContent.BeginVertical();
-            composerContent.Add(CopilotTheme.CreateSectionHeader("Message  •  Ctrl+Enter to send"));
             composerContent.Add(_promptBox);
+            composerContent.Add(optionsRow);
             composerContent.Add(composerFooter);
             composerContent.EndVertical();
             Panel composerCard = CopilotTheme.CreateCard(composerContent, CopilotTheme.BorderStrong, CopilotTheme.Surface, padding: 8);
@@ -319,13 +346,14 @@ namespace GhCopilot.UI
             var layout = new DynamicLayout
             {
                 Padding = new Padding(8, 6, 8, 4),
-                Spacing = new Size(6, 6)
+                Spacing = new Size(6, 5)
             };
 
             layout.BeginVertical();
             layout.Add(modeCard);
             layout.Add(transcriptCard, yscale: true);
             layout.Add(_thinkingCard);
+            layout.Add(_approvalCard);
             layout.Add(_starterChipsPanel);
             layout.Add(toolsRow);
             layout.Add(composerCard);
@@ -398,6 +426,25 @@ namespace GhCopilot.UI
             }
         }
 
+        private void OnPlanFirstToggled(object? sender, EventArgs e)
+        {
+            try
+            {
+                AppSettings settings = AppSettings.Load();
+                settings.PlanFirstMode = _planFirstCheck.Checked != false;
+                settings.Save();
+                SetStatus(
+                    settings.PlanFirstMode
+                        ? "Plan First enabled: Copilot will sketch a diagram & plan before building."
+                        : "Plan First disabled: Copilot will build immediately on Send.",
+                    CopilotTheme.AccentCyan);
+            }
+            catch (Exception)
+            {
+                // Non-fatal UI persistence.
+            }
+        }
+
         private void RefreshStarterChipsContent()
         {
             bool rhinoPrimary = IsRhinoPrimaryMode();
@@ -435,6 +482,19 @@ namespace GhCopilot.UI
         {
             bool show = !_hasTranscriptEntries && string.IsNullOrWhiteSpace(_promptBox.Text);
             _starterChipsPanel.Visible = show;
+        }
+
+        private void RefreshApprovalCardVisibility()
+        {
+            bool running = _activeCts != null;
+            ChatSession session = CopilotHostRegistry.SharedSession;
+            bool hasPendingPlan = !string.IsNullOrWhiteSpace(session.PendingPlanSummary);
+            bool hasBuilt = session.HasBuiltInCurrentSession;
+
+            _approvalCard.Visible = !running && (hasPendingPlan || hasBuilt);
+            _approveBuildButton.Visible = hasPendingPlan;
+            _approveBuildButton.Enabled = !running && hasPendingPlan;
+            _verifyViewportButton.Enabled = !running;
         }
 
         private void PopulatePrompt(string sample)
@@ -499,9 +559,9 @@ namespace GhCopilot.UI
             _expectedDurationSeconds = isQuickTurn ? _emaQuickTurnSeconds : _emaGraphTurnSeconds;
             _turnStopwatch.Restart();
             UpdateThinkingDisplay(isQuickTurn
-                ? "💭 Reading message context..."
+                ? "💭 Reading context & live viewport..."
                 : (isRhinoDirect
-                    ? "🧠 Inspecting Rhino scene & planning direct operations..."
+                    ? "🧠 Inspecting Rhino viewport & planning actions..."
                     : "🧠 Analyzing prompt & preparing Grasshopper workspace..."));
 
             _etaTimer = new UITimer { Interval = 0.25 };
@@ -520,15 +580,22 @@ namespace GhCopilot.UI
                 _etaTimer = null;
             }
             _thinkingCard.Visible = false;
+            _chatControl.SetThinkingState(false);
         }
 
         private void UpdateEtaTick()
         {
             double elapsed = _turnStopwatch.Elapsed.TotalSeconds;
             double remaining = Math.Max(0.5, _expectedDurationSeconds - elapsed);
-            _etaLabel.Text = elapsed < _expectedDurationSeconds
+            string etaText = elapsed < _expectedDurationSeconds
                 ? $"{elapsed:F1}s • ETA ~{remaining:F0}s"
                 : $"{elapsed:F1}s • Finalizing...";
+            _etaLabel.Text = etaText;
+
+            string trail = _thoughtSteps.Count > 1
+                ? "Steps: " + string.Join("  →  ", _thoughtSteps)
+                : "Inspecting scene & thinking...";
+            _chatControl.SetThinkingState(true, _latestThought, trail, etaText);
         }
 
         private void UpdateThinkingDisplay(string stage)
@@ -573,10 +640,8 @@ namespace GhCopilot.UI
                 return;
             }
 
-            ChatSession? session = (CopilotHostRegistry.GrasshopperBridge as IChatHostBridge)?.Session
-                ?? CopilotHostRegistry.RhinoBridge?.Session;
-
-            if (session != null && session.Messages.Count > 0)
+            ChatSession session = CopilotHostRegistry.SharedSession;
+            if (session.Messages.Count > 0)
             {
                 if (!string.IsNullOrEmpty(session.Summary))
                 {
@@ -633,21 +698,78 @@ namespace GhCopilot.UI
 
         private bool CanStartAction()
         {
-            if (_activeCts != null) return false;
-            if (CopilotHostRegistry.GrasshopperBridge?.HasActivePreview == true)
-            {
-                SetStatus("Accept or reject the pending preview before continuing.", CopilotTheme.WarningAmber);
-                UpdateActionState();
-                return false;
-            }
-            return true;
+            return _activeCts == null;
         }
 
-        private async Task RunBridgeActionAsync(string prompt, ChatAction action, string busyMessage)
+        private CopilotWorkMode ResolveRoutingForPrompt(string prompt, bool useRhinoSelection)
+        {
+            bool isGhOpen = CopilotHostRegistry.GrasshopperBridge != null;
+            if (_selectedMode != CopilotWorkMode.Auto || useRhinoSelection)
+            {
+                return RhinoPromptBuilder.ResolveEffectiveMode(_selectedMode, prompt, isGhOpen, useRhinoSelection);
+            }
+
+            ChatSession session = CopilotHostRegistry.SharedSession;
+            CopilotWorkMode resolved = RhinoPromptBuilder.ResolveEffectiveMode(CopilotWorkMode.Auto, prompt, isGhOpen, false);
+
+            // Preserve planned/active target engine when user approves a plan or requests a follow-up tweak
+            // so e.g. "yes, build it" or "make it taller" continues in whichever mode drafted/built it.
+            if (!string.IsNullOrWhiteSpace(session.PendingPlanSummary) && _pendingPlanTargetMode.HasValue)
+            {
+                return _pendingPlanTargetMode.Value;
+            }
+
+            if (session.HasBuiltInCurrentSession &&
+                _lastBuiltMode.HasValue &&
+                ChatPromptBuilder.IsFollowUpAlterationPrompt(prompt))
+            {
+                return _lastBuiltMode.Value;
+            }
+
+            return resolved;
+        }
+
+        private async Task SendPromptTextAsync(string prompt)
         {
             if (!CanStartAction()) return;
 
-            IGrasshopperHostBridge? bridge = await EnsureGrasshopperLoadedAsync().ConfigureAwait(true);
+            bool useRhinoSelection = _useRhinoSelection.Checked == true;
+            CopilotWorkMode effectiveMode = ResolveRoutingForPrompt(prompt, useRhinoSelection);
+
+            if (effectiveMode == CopilotWorkMode.RhinoDirect)
+            {
+                IRhinoHostBridge? rhinoBridge = CopilotHostRegistry.RhinoBridge;
+                if (rhinoBridge is null)
+                {
+                    const string missingRhino = "Direct Rhino host bridge is not initialized yet.";
+                    SetStatus(missingRhino, CopilotTheme.WarningAmber);
+                    AppendBubble("GH Copilot", missingRhino);
+                    return;
+                }
+
+                await ExecuteRhinoDirectAsync(rhinoBridge, prompt, explainOnly: false, "Working in Direct Rhino Mode...", effectiveMode);
+                return;
+            }
+
+            await RunBridgeActionAsync(prompt, ChatAction.Message, "Processing in Grasshopper...", effectiveMode);
+        }
+
+        private async Task RunBridgeActionAsync(
+            string prompt,
+            ChatAction action,
+            string busyMessage,
+            CopilotWorkMode targetMode = CopilotWorkMode.Grasshopper)
+        {
+            if (!CanStartAction()) return;
+
+            // Avoid launching Grasshopper unnecessarily when merely planning in Auto or chatting conversationally.
+            bool needsGrasshopperLaunch = true;
+            IGrasshopperHostBridge? bridge = CopilotHostRegistry.GrasshopperBridge;
+            if (bridge is null && needsGrasshopperLaunch)
+            {
+                bridge = await EnsureGrasshopperLoadedAsync().ConfigureAwait(true);
+            }
+
             if (bridge is null)
             {
                 const string missing = "Could not start Grasshopper automatically. Switch to Rhino Direct or open Grasshopper from Rhino and try again.";
@@ -664,7 +786,7 @@ namespace GhCopilot.UI
                 return;
             }
 
-            await ExecuteGrasshopperAsync(bridge, prompt, action, useRhinoSelection, busyMessage).ConfigureAwait(true);
+            await ExecuteGrasshopperAsync(bridge, prompt, action, useRhinoSelection, busyMessage, targetMode).ConfigureAwait(true);
         }
 
         private Task ExecuteGrasshopperAsync(
@@ -672,12 +794,16 @@ namespace GhCopilot.UI
             string prompt,
             ChatAction action,
             bool useRhinoSelection,
-            string busyMessage)
+            string busyMessage,
+            CopilotWorkMode targetMode)
         {
             IChatHostBridge? chat = bridge as IChatHostBridge;
+            ChatSession session = CopilotHostRegistry.SharedSession;
             bool isQuickTurn = action == ChatAction.ExplainSelection ||
                                action == ChatAction.SaveRecipe ||
-                               (action == ChatAction.Message && !useRhinoSelection && ChatPromptBuilder.IsConversationalOnlyPrompt(prompt));
+                               (action == ChatAction.Message && !useRhinoSelection &&
+                                (ChatPromptBuilder.IsConversationalOnlyPrompt(prompt) ||
+                                 ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, session, _planFirstCheck.Checked != false)));
             string userBubble = (action == ChatAction.Message ? string.Empty : "[" + action + "] ")
                 + prompt + (useRhinoSelection ? " [Use Rhino Selection]" : string.Empty);
 
@@ -685,6 +811,7 @@ namespace GhCopilot.UI
                 userBubble,
                 isQuickTurn,
                 isRhinoDirect: false,
+                targetMode: targetMode,
                 clearPromptOnSuccess: action == ChatAction.Message,
                 busyMessage,
                 async (ct, onEstimate, onStage) =>
@@ -725,17 +852,22 @@ namespace GhCopilot.UI
             IRhinoHostBridge rhinoBridge,
             string prompt,
             bool explainOnly,
-            string busyMessage)
+            string busyMessage,
+            CopilotWorkMode targetMode = CopilotWorkMode.RhinoDirect)
         {
-            bool isQuickTurn = explainOnly || ChatPromptBuilder.IsConversationalOnlyPrompt(prompt);
+            ChatSession session = CopilotHostRegistry.SharedSession;
+            bool isQuickTurn = explainOnly ||
+                               ChatPromptBuilder.IsConversationalOnlyPrompt(prompt) ||
+                               ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, session, _planFirstCheck.Checked != false);
             string displayPrompt = explainOnly
-                ? (string.IsNullOrWhiteSpace(prompt) ? "[Explain Rhino Scene]" : "[Explain Rhino] " + prompt)
+                ? (string.IsNullOrWhiteSpace(prompt) ? "Verify & explain my live Rhino viewport" : "[Explain Rhino] " + prompt)
                 : prompt;
 
             return RunManagedTurnAsync(
                 displayPrompt,
                 isQuickTurn,
                 isRhinoDirect: true,
+                targetMode: targetMode,
                 clearPromptOnSuccess: !explainOnly,
                 busyMessage,
                 async (ct, onEstimate, onStage) =>
@@ -759,6 +891,7 @@ namespace GhCopilot.UI
             string userBubbleText,
             bool isQuickTurn,
             bool isRhinoDirect,
+            CopilotWorkMode targetMode,
             bool clearPromptOnSuccess,
             string busyMessage,
             Func<CancellationToken, Action<int>, Action<string>, Task<CopilotGenerationResponse>> runner,
@@ -817,6 +950,16 @@ namespace GhCopilot.UI
                             {
                                 if (isQuickTurn) _emaQuickTurnSeconds = Math.Max(1.0, 0.6 * _emaQuickTurnSeconds + 0.4 * elapsedSeconds);
                                 else _emaGraphTurnSeconds = Math.Max(2.0, 0.6 * _emaGraphTurnSeconds + 0.4 * elapsedSeconds);
+
+                                if (response.IsPlanProposal)
+                                {
+                                    _pendingPlanTargetMode = targetMode;
+                                }
+                                else if (response.NodeCount > 0)
+                                {
+                                    _pendingPlanTargetMode = null;
+                                    _lastBuiltMode = targetMode;
+                                }
                             }
 
                             SetStatus(response.StatusLine, response.IsSuccess ? CopilotTheme.AccentEmerald : CopilotTheme.DangerRose);
@@ -825,7 +968,10 @@ namespace GhCopilot.UI
                                 "GH Copilot",
                                 (response.IsSuccess ? "" : "[Error] ") + answer,
                                 thoughtSummary,
-                                elapsedSeconds);
+                                elapsedSeconds,
+                                response.IsPlanProposal,
+                                response.ViewportImageBase64Png,
+                                response.ViewportVerificationSummary);
 
                             var combinedMessages = new List<string>();
                             foreach (string warning in response.ValidatorWarnings) combinedMessages.Add("[Validator] " + warning);
@@ -881,28 +1027,33 @@ namespace GhCopilot.UI
                 return;
             }
 
+            await SendPromptTextAsync(prompt);
+        }
+
+        private async void OnApproveBuildClicked(object? sender, EventArgs e)
+        {
+            await SendPromptTextAsync("[Approve & Build] Yes, approved — build the planned design now.");
+        }
+
+        private async void OnVerifyViewportClicked(object? sender, EventArgs e)
+        {
             if (!CanStartAction()) return;
 
-            bool isGhOpen = CopilotHostRegistry.GrasshopperBridge != null;
-            bool useRhinoSelection = _useRhinoSelection.Checked == true;
-            CopilotWorkMode effectiveMode = RhinoPromptBuilder.ResolveEffectiveMode(_selectedMode, prompt, isGhOpen, useRhinoSelection);
-
-            if (effectiveMode == CopilotWorkMode.RhinoDirect)
+            IRhinoHostBridge? rhinoBridge = CopilotHostRegistry.RhinoBridge;
+            if (rhinoBridge != null)
             {
-                IRhinoHostBridge? rhinoBridge = CopilotHostRegistry.RhinoBridge;
-                if (rhinoBridge is null)
-                {
-                    const string missingRhino = "Direct Rhino host bridge is not initialized yet.";
-                    SetStatus(missingRhino, CopilotTheme.WarningAmber);
-                    AppendBubble("GH Copilot", missingRhino);
-                    return;
-                }
-
-                await ExecuteRhinoDirectAsync(rhinoBridge, prompt, explainOnly: false, "Executing in Direct Rhino Mode...");
+                await ExecuteRhinoDirectAsync(
+                    rhinoBridge,
+                    "Look closely at my live Rhino viewport image and geometry right now. Verify whether the last changes were implemented cleanly or if anything needs adjustment.",
+                    explainOnly: true,
+                    "Inspecting live Rhino viewport image...");
                 return;
             }
 
-            await RunBridgeActionAsync(prompt, ChatAction.Message, "Processing your message...");
+            await RunBridgeActionAsync(
+                "Inspect my live Rhino viewport image and geometry right now and confirm whether everything is working cleanly.",
+                ChatAction.ExplainSelection,
+                "Inspecting live viewport...");
         }
 
         private async void OnExplainClicked(object? sender, EventArgs e)
@@ -949,6 +1100,8 @@ namespace GhCopilot.UI
                     try
                     {
                         string status = rhinoBridge.SpawnRhinoDemo();
+                        CopilotHostRegistry.SharedSession.HasBuiltInCurrentSession = true;
+                        _lastBuiltMode = CopilotWorkMode.RhinoDirect;
                         SetStatus(status, CopilotTheme.AccentEmerald);
                         AppendBubble("GH Copilot", status + Environment.NewLine + "Layer 'GH Copilot Demo': pedestal plinth + orb + 4 columns (Shaded + Zoom Extents).");
                         UpdateDiagnosticsDisplay(new List<string>());
@@ -961,6 +1114,7 @@ namespace GhCopilot.UI
                     finally
                     {
                         _previewBar.RefreshState();
+                        UpdateActionState();
                         UpdateStarterChipsVisibility();
                     }
                     return;
@@ -981,6 +1135,8 @@ namespace GhCopilot.UI
             try
             {
                 string status = bridge.SpawnDemoGraph();
+                CopilotHostRegistry.SharedSession.HasBuiltInCurrentSession = true;
+                _lastBuiltMode = CopilotWorkMode.Grasshopper;
                 SetStatus(status, CopilotTheme.AccentEmerald);
                 AppendBubble("GH Copilot", status + Environment.NewLine + "Slider(12.5) + Slider(7.5) -> Addition -> Panel.");
                 UpdateDiagnosticsDisplay(new List<string>());
@@ -993,6 +1149,7 @@ namespace GhCopilot.UI
             finally
             {
                 _previewBar.RefreshState();
+                UpdateActionState();
                 UpdateStarterChipsVisibility();
             }
         }
@@ -1010,15 +1167,18 @@ namespace GhCopilot.UI
             {
                 (CopilotHostRegistry.GrasshopperBridge as IChatHostBridge)?.NewChat();
                 CopilotHostRegistry.RhinoBridge?.NewChat();
+                CopilotHostRegistry.SharedSession.Clear();
+                _pendingPlanTargetMode = null;
+                _lastBuiltMode = null;
                 _hasTranscriptEntries = false;
-                _transcriptBox.TextColor = CopilotTheme.TextSecondary;
-                _transcriptBox.Text = WelcomePlaceholder;
+                _chatControl.ClearMessages();
                 _promptBox.Text = string.Empty;
                 _useRhinoSelection.Checked = false;
                 _tokenEstimateLabel.Text = "~0 tok";
                 UpdateDiagnosticsDisplay(new List<string>());
                 SetDiagnosticsExpanded(false);
                 UpdateStarterChipsVisibility();
+                UpdateActionState();
                 _previewBar.RefreshState();
                 SetStatus("New chat ready. Existing Rhino & canvas objects are unchanged.", CopilotTheme.AccentCyan);
             }
@@ -1029,44 +1189,26 @@ namespace GhCopilot.UI
             }
         }
 
-        private void AppendBubble(string role, string content, string? thought = null, double? elapsedSeconds = null)
+        private void AppendBubble(
+            string role,
+            string content,
+            string? thought = null,
+            double? elapsedSeconds = null,
+            bool isPlanProposal = false,
+            string? viewportImageBase64Png = null,
+            string? viewportSummary = null)
         {
-            string timestamp = DateTime.Now.ToString("HH:mm");
-            string title = role == "You"
-                ? $"┌─ You  •  {timestamp} ──────────────────────────"
-                : elapsedSeconds.HasValue && elapsedSeconds.Value > 0
-                    ? $"┌─ ✦ {role}  •  {timestamp} ({elapsedSeconds.Value:F1}s) ──────────"
-                    : $"┌─ ✦ {role}  •  {timestamp} ──────────────────";
-
-            var lines = new List<string> { title };
-            if (!string.IsNullOrWhiteSpace(thought))
-            {
-                lines.Add($"│ {thought}");
-                lines.Add("│");
-            }
-
-            string normalized = (content ?? string.Empty).Replace("\r\n", "\n");
-            foreach (string line in normalized.Split('\n'))
-            {
-                lines.Add($"│ {line}");
-            }
-
-            lines.Add("└───────────────────────────────────────────");
-            string bubble = string.Join(Environment.NewLine, lines);
-
-            if (!_hasTranscriptEntries)
-            {
-                _hasTranscriptEntries = true;
-                _transcriptBox.TextColor = CopilotTheme.TextPrimary;
-                _transcriptBox.Text = bubble;
-            }
-            else
-            {
-                _transcriptBox.Text = (_transcriptBox.Text ?? string.Empty) + Environment.NewLine + Environment.NewLine + bubble;
-            }
-
+            _chatControl.AppendMessage(
+                role,
+                content,
+                thought,
+                elapsedSeconds,
+                isPlanProposal,
+                viewportImageBase64Png,
+                viewportSummary);
+            _hasTranscriptEntries = _chatControl.HasMessages;
             _starterChipsPanel.Visible = false;
-            _transcriptBox.CaretIndex = _transcriptBox.Text.Length;
+            RefreshApprovalCardVisibility();
         }
 
         private void ShowTokenEstimate(int estimate)
@@ -1077,23 +1219,24 @@ namespace GhCopilot.UI
         private void UpdateActionState()
         {
             bool running = _activeCts != null;
-            bool canAct = !running && CopilotHostRegistry.GrasshopperBridge?.HasActivePreview != true;
             bool ghToolsAvailable = _selectedMode != CopilotWorkMode.RhinoDirect;
 
             _modeAutoButton.Enabled = !running;
             _modeRhinoButton.Enabled = !running;
             _modeGhButton.Enabled = !running;
-            _sendButton.Enabled = canAct;
-            _explainButton.Enabled = canAct;
-            _fixButton.Enabled = canAct && ghToolsAvailable;
-            _saveRecipeButton.Enabled = canAct && ghToolsAvailable;
-            _demoButton.Enabled = canAct;
-            _newChatButton.Enabled = canAct;
-            _useRhinoSelection.Enabled = canAct && ghToolsAvailable;
-            _chipOne.Enabled = canAct;
-            _chipTwo.Enabled = canAct;
-            _chipThree.Enabled = canAct;
+            _sendButton.Enabled = !running;
+            _explainButton.Enabled = !running;
+            _fixButton.Enabled = !running && ghToolsAvailable;
+            _saveRecipeButton.Enabled = !running && ghToolsAvailable;
+            _demoButton.Enabled = !running;
+            _newChatButton.Enabled = !running;
+            _planFirstCheck.Enabled = !running;
+            _useRhinoSelection.Enabled = !running && ghToolsAvailable;
+            _chipOne.Enabled = !running;
+            _chipTwo.Enabled = !running;
+            _chipThree.Enabled = !running;
             _promptBox.Enabled = !running;
+            RefreshApprovalCardVisibility();
         }
 
         private void SetRunningState(bool isRunning, string? statusText = null)

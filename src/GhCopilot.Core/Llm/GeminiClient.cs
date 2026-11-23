@@ -69,6 +69,10 @@ namespace GhCopilot.Core.Llm
 
             _ownsHttpClient = httpClient is null;
             _httpClient = httpClient ?? new HttpClient();
+            if (_ownsHttpClient)
+            {
+                _httpClient.Timeout = Timeout.InfiniteTimeSpan;
+            }
             _baseUrl = baseUrl.TrimEnd('/');
         }
 
@@ -241,7 +245,7 @@ namespace GhCopilot.Core.Llm
         }
 
         /// <summary>
-        /// Calls the configured LLM provider using structured JSON output.
+        /// Calls the configured LLM provider using structured JSON output (and optional live viewport PNG).
         /// </summary>
         public async Task<string> GenerateGraphJsonAsync(
             string apiKey,
@@ -252,20 +256,21 @@ namespace GhCopilot.Core.Llm
             TimeSpan? timeout = null,
             CancellationToken cancellationToken = default,
             string provider = "Gemini",
-            string? customEndpointUrl = null)
+            string? customEndpointUrl = null,
+            string? imageBase64Png = null)
         {
             string cleanKey = SanitizeApiKey(apiKey);
             string normalizedProvider = NormalizeProvider(provider);
             if (normalizedProvider == "Anthropic")
             {
                 string augmentedSystem = $"{systemInstruction}\n\nReturn ONLY raw JSON strictly conforming to this JSON Schema (no markdown fences or prose):\n{responseJsonSchema.GetRawText()}";
-                return await SendAnthropicAsync(cleanKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, stripCodeFences: true, timeout, customEndpointUrl, cancellationToken).ConfigureAwait(false);
+                return await SendAnthropicAsync(cleanKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, stripCodeFences: true, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
             }
 
             if (normalizedProvider == "OpenAI")
             {
                 string augmentedSystem = $"{systemInstruction}\n\nReturn ONLY a JSON object strictly conforming to this JSON Schema:\n{responseJsonSchema.GetRawText()}";
-                return await SendOpenAiAsync(cleanKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, jsonMode: true, timeout, customEndpointUrl, cancellationToken).ConfigureAwait(false);
+                return await SendOpenAiAsync(cleanKey, modelId, augmentedSystem, userPrompt, temperature: 0.1, jsonMode: true, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
             }
 
             object generationConfig = new
@@ -286,7 +291,23 @@ namespace GhCopilot.Core.Llm
                     stripCodeFences: true,
                     timeout,
                     customEndpointUrl,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    imageBase64Png).ConfigureAwait(false);
+            }
+            catch (GeminiApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png) && !IsSchemaFieldError(ex.Message))
+            {
+                // Fallback when the chosen model/endpoint does not accept image inputs: retry text-only.
+                return await GenerateGraphJsonAsync(
+                    cleanKey,
+                    modelId,
+                    systemInstruction,
+                    userPrompt,
+                    responseJsonSchema,
+                    timeout,
+                    cancellationToken,
+                    provider,
+                    customEndpointUrl,
+                    imageBase64Png: null).ConfigureAwait(false);
             }
             catch (GeminiApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && IsSchemaFieldError(ex.Message))
             {
@@ -299,23 +320,41 @@ namespace GhCopilot.Core.Llm
                     responseMimeType = "application/json"
                 };
 
-                return await SendGeminiGenerateContentAsync(
-                    cleanKey,
-                    modelId,
-                    fallbackSystem,
-                    userPrompt,
-                    fallbackConfig,
-                    stripCodeFences: true,
-                    timeout,
-                    customEndpointUrl,
-                    cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    return await SendGeminiGenerateContentAsync(
+                        cleanKey,
+                        modelId,
+                        fallbackSystem,
+                        userPrompt,
+                        fallbackConfig,
+                        stripCodeFences: true,
+                        timeout,
+                        customEndpointUrl,
+                        cancellationToken,
+                        imageBase64Png).ConfigureAwait(false);
+                }
+                catch (GeminiApiException imgEx) when (imgEx.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png))
+                {
+                    return await SendGeminiGenerateContentAsync(
+                        cleanKey,
+                        modelId,
+                        fallbackSystem,
+                        userPrompt,
+                        fallbackConfig,
+                        stripCodeFences: true,
+                        timeout,
+                        customEndpointUrl,
+                        cancellationToken,
+                        imageBase64Png: null).ConfigureAwait(false);
+                }
             }
         }
 
         /// <summary>
-        /// Calls the configured LLM provider for plain-text or markdown explanations (used by Explain Selection).
+        /// Calls the configured LLM provider for plain-text or markdown explanations (with optional live viewport PNG).
         /// </summary>
-        public Task<string> GenerateTextAsync(
+        public async Task<string> GenerateTextAsync(
             string apiKey,
             string modelId,
             string systemInstruction,
@@ -323,18 +362,19 @@ namespace GhCopilot.Core.Llm
             TimeSpan? timeout = null,
             CancellationToken cancellationToken = default,
             string provider = "Gemini",
-            string? customEndpointUrl = null)
+            string? customEndpointUrl = null,
+            string? imageBase64Png = null)
         {
             string cleanKey = SanitizeApiKey(apiKey);
             string normalizedProvider = NormalizeProvider(provider);
             if (normalizedProvider == "Anthropic")
             {
-                return SendAnthropicAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, stripCodeFences: false, timeout, customEndpointUrl, cancellationToken);
+                return await SendAnthropicAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, stripCodeFences: false, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
             }
 
             if (normalizedProvider == "OpenAI")
             {
-                return SendOpenAiAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, jsonMode: false, timeout, customEndpointUrl, cancellationToken);
+                return await SendOpenAiAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, jsonMode: false, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
             }
 
             object generationConfig = new
@@ -342,16 +382,34 @@ namespace GhCopilot.Core.Llm
                 temperature = 0.2
             };
 
-            return SendGeminiGenerateContentAsync(
-                cleanKey,
-                modelId,
-                systemInstruction,
-                userPrompt,
-                generationConfig,
-                stripCodeFences: false,
-                timeout,
-                customEndpointUrl,
-                cancellationToken);
+            try
+            {
+                return await SendGeminiGenerateContentAsync(
+                    cleanKey,
+                    modelId,
+                    systemInstruction,
+                    userPrompt,
+                    generationConfig,
+                    stripCodeFences: false,
+                    timeout,
+                    customEndpointUrl,
+                    cancellationToken,
+                    imageBase64Png).ConfigureAwait(false);
+            }
+            catch (GeminiApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png))
+            {
+                return await SendGeminiGenerateContentAsync(
+                    cleanKey,
+                    modelId,
+                    systemInstruction,
+                    userPrompt,
+                    generationConfig,
+                    stripCodeFences: false,
+                    timeout,
+                    customEndpointUrl,
+                    cancellationToken,
+                    imageBase64Png: null).ConfigureAwait(false);
+            }
         }
 
         private async Task<string> SendGeminiGenerateContentAsync(
@@ -363,11 +421,20 @@ namespace GhCopilot.Core.Llm
             bool stripCodeFences,
             TimeSpan? timeout,
             string? customEndpointUrl,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? imageBase64Png = null)
         {
             ValidateKeyAndModel(apiKey, modelId, out string normalizedModelId);
             string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? _baseUrl : customEndpointUrl!.TrimEnd('/');
             string url = $"{baseEndpoint}/models/{Uri.EscapeDataString(normalizedModelId)}:generateContent";
+
+            object[] userParts = string.IsNullOrWhiteSpace(imageBase64Png)
+                ? new object[] { new { text = userPrompt } }
+                : new object[]
+                {
+                    new { text = userPrompt },
+                    new { inline_data = new { mime_type = "image/png", data = imageBase64Png } }
+                };
 
             var payload = new
             {
@@ -383,10 +450,7 @@ namespace GhCopilot.Core.Llm
                     new
                     {
                         role = "user",
-                        parts = new[]
-                        {
-                            new { text = userPrompt }
-                        }
+                        parts = userParts
                     }
                 },
                 generationConfig
@@ -399,7 +463,7 @@ namespace GhCopilot.Core.Llm
             };
             request.Headers.Add("x-goog-api-key", apiKey.Trim());
 
-            TimeSpan effectiveTimeout = timeout ?? TimeSpan.FromSeconds(45);
+            TimeSpan effectiveTimeout = timeout ?? TimeSpan.FromSeconds(Settings.AppSettings.DefaultRequestTimeoutSeconds);
             string responseBody = await SendAndReadBodyAsync(request, apiKey, effectiveTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
@@ -415,11 +479,24 @@ namespace GhCopilot.Core.Llm
             bool stripCodeFences,
             TimeSpan? timeout,
             string? customEndpointUrl,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? imageBase64Png = null)
         {
             ValidateKeyAndModel(apiKey, modelId, out string normalizedModelId);
             string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? AnthropicBaseUrl : customEndpointUrl!.TrimEnd('/');
             string url = $"{baseEndpoint}/messages";
+
+            object contentValue = string.IsNullOrWhiteSpace(imageBase64Png)
+                ? (object)userPrompt
+                : new object[]
+                {
+                    new
+                    {
+                        type = "image",
+                        source = new { type = "base64", media_type = "image/png", data = imageBase64Png }
+                    },
+                    new { type = "text", text = userPrompt }
+                };
 
             var payload = new
             {
@@ -429,7 +506,7 @@ namespace GhCopilot.Core.Llm
                 system = systemInstruction,
                 messages = new[]
                 {
-                    new { role = "user", content = userPrompt }
+                    new { role = "user", content = contentValue }
                 }
             };
 
@@ -441,7 +518,7 @@ namespace GhCopilot.Core.Llm
             request.Headers.Add("x-api-key", apiKey.Trim());
             request.Headers.Add("anthropic-version", "2023-06-01");
 
-            TimeSpan effectiveTimeout = timeout ?? TimeSpan.FromSeconds(60);
+            TimeSpan effectiveTimeout = timeout ?? TimeSpan.FromSeconds(Settings.AppSettings.DefaultRequestTimeoutSeconds);
             string responseBody = await SendAndReadBodyAsync(request, apiKey, effectiveTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
@@ -457,11 +534,20 @@ namespace GhCopilot.Core.Llm
             bool jsonMode,
             TimeSpan? timeout,
             string? customEndpointUrl,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? imageBase64Png = null)
         {
             ValidateKeyAndModel(apiKey, modelId, out string normalizedModelId);
             string baseEndpoint = string.IsNullOrWhiteSpace(customEndpointUrl) ? OpenAiBaseUrl : customEndpointUrl!.TrimEnd('/');
             string url = $"{baseEndpoint}/chat/completions";
+
+            object userContent = string.IsNullOrWhiteSpace(imageBase64Png)
+                ? (object)userPrompt
+                : new object[]
+                {
+                    new { type = "text", text = userPrompt },
+                    new { type = "image_url", image_url = new { url = "data:image/png;base64," + imageBase64Png } }
+                };
 
             object payload = jsonMode
                 ? new
@@ -469,20 +555,20 @@ namespace GhCopilot.Core.Llm
                     model = normalizedModelId,
                     temperature,
                     response_format = new { type = "json_object" },
-                    messages = new[]
+                    messages = new object[]
                     {
-                        new { role = "system", content = systemInstruction },
-                        new { role = "user", content = userPrompt }
+                        new { role = "system", content = (object)systemInstruction },
+                        new { role = "user", content = userContent }
                     }
                 }
                 : new
                 {
                     model = normalizedModelId,
                     temperature,
-                    messages = new[]
+                    messages = new object[]
                     {
-                        new { role = "system", content = systemInstruction },
-                        new { role = "user", content = userPrompt }
+                        new { role = "system", content = (object)systemInstruction },
+                        new { role = "user", content = userContent }
                     }
                 };
 
@@ -493,7 +579,7 @@ namespace GhCopilot.Core.Llm
             };
             request.Headers.Add("Authorization", $"Bearer {apiKey.Trim()}");
 
-            TimeSpan effectiveTimeout = timeout ?? TimeSpan.FromSeconds(60);
+            TimeSpan effectiveTimeout = timeout ?? TimeSpan.FromSeconds(Settings.AppSettings.DefaultRequestTimeoutSeconds);
             string responseBody = await SendAndReadBodyAsync(request, apiKey, effectiveTimeout, cancellationToken)
                 .ConfigureAwait(false);
 

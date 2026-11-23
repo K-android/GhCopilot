@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using GhCopilot.Core.Graph;
+using GhCopilot.Core.Host;
 using GhCopilot.Core.Index;
 
 namespace GhCopilot.Core.Llm
@@ -20,6 +21,23 @@ namespace GhCopilot.Core.Llm
             "bye", "goodbye", "ping", "test", "who are you", "what are you", "what can you do",
             "help", "how does this work"
         };
+
+        private static readonly HashSet<string> ExactApprovalPhrases = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "yes", "yep", "yeah", "yup", "ok", "okay", "sure", "approve", "approved",
+            "confirm", "confirmed", "proceed", "execute", "build", "generate", "apply",
+            "build it", "make it", "create it", "do it", "go ahead", "looks good",
+            "sounds good", "lets do it", "let's do it", "generate it", "apply it",
+            "ok build", "okay build"
+        };
+
+        private static readonly Regex ApprovalPhraseRegex = new Regex(
+            @"(?i)(?:^\[Approve\s*&\s*Build\]|\b(?:approve|approved|go\s+ahead|looks\s+good|sounds\s+good|let'?s\s+(?:do|build|make)\s+(?:it|this)|ok(?:ay)?\s+build)\b|\b(?:build|make|create|do|generate|apply)\s+it\b$|^yes\b[,\s]*(?:please|build|make|create|proceed|go|do\s+it)?)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex FollowUpAlterationRegex = new Regex(
+            @"\b(?:now|also|instead|change|modify|update|adjust|tweak|alter|increase|decrease|double|halve|triple|move|rotate|scale|color|colour|paint|rename|hide|show|delete|remove|zoom|switch|make\s+it|make\s+the|set\s+the|add\s+a|add\s+more|extrude\s+it|cap\s+it|offset\s+it)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private static readonly Regex CadActionKeywordRegex = new Regex(
             @"\b(?:create|make|build|add|spawn|generate|place|draw|model|design|extend|continue|further|expand|append|attach|hook|link|wire|connect|unwire|disconnect|delete|remove|change|set|update|modify|edit|fix|repair|replace|increase|decrease|slider|panel|circle|line|point|curve|surface|brep|mesh|box|sphere|cylinder|cone|torus|arc|polygon|rectangle|grid|attractor|extrude|loft|pipe|sweep|revolve|offset|move|rotate|scale|transform|array|divide|contour|voronoi|delaunay|populate|random|series|range|domain|remap|math|multiply|subtract|python|script|cluster|component|node|param|input|output|flatten|graft|simplify|reverse|tower|facade|truss|bridge|stair|spiral|wall|roof|floor|column|beam|shell|canopy|pavilion|pattern|wave|rib|fin|louver|zoom|shaded|rendered|wireframe|ghosted|arctic|raytraced|monochrome|layer|layers|color|colour|paint|hide|show|unhide|select|deselect|rename|copy|duplicate|switch|camera|viewport)\b",
@@ -94,6 +112,19 @@ namespace GhCopilot.Core.Llm
                     sb.AppendLine($"  Pattern: {RedactGuids(JsonSerializer.Serialize(recipe.Spec, CompactJson))}");
                 }
             }
+
+            if (!string.IsNullOrWhiteSpace(session.PendingPlanSummary))
+            {
+                sb.AppendLine("APPROVED / PENDING PLAN CONTEXT:");
+                sb.AppendLine(RedactGuids(session.PendingPlanSummary));
+            }
+
+            if (!string.IsNullOrWhiteSpace(session.LastViewportVerification))
+            {
+                sb.AppendLine("LAST VIEWPORT VERIFICATION:");
+                sb.AppendLine(RedactGuids(session.LastViewportVerification));
+            }
+
             sb.AppendLine("NEW USER MESSAGE:");
             sb.Append(newUser);
             return sb.ToString();
@@ -102,6 +133,146 @@ namespace GhCopilot.Core.Llm
         public static bool RequestsWholeCanvasInspection(string? prompt)
         {
             return !string.IsNullOrWhiteSpace(prompt) && WholeCanvasRegex.IsMatch(prompt!);
+        }
+
+        public static bool IsApprovalOrBuildConfirmation(string? prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                return false;
+            }
+
+            string normalized = prompt!.Trim().TrimEnd('.', '?', '!', ',', '~', ' ');
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return false;
+            }
+
+            return ExactApprovalPhrases.Contains(normalized) || ApprovalPhraseRegex.IsMatch(normalized);
+        }
+
+        public static bool IsFollowUpAlterationPrompt(string? prompt)
+        {
+            return !string.IsNullOrWhiteSpace(prompt) && FollowUpAlterationRegex.IsMatch(prompt!);
+        }
+
+        public static bool ShouldPlanBeforeBuilding(string? prompt, ChatSession session, bool planFirstEnabled)
+        {
+            if (!planFirstEnabled || string.IsNullOrWhiteSpace(prompt))
+            {
+                return false;
+            }
+
+            if (session is null) throw new ArgumentNullException(nameof(session));
+
+            if (IsApprovalOrBuildConfirmation(prompt))
+            {
+                return false;
+            }
+
+            if (IsConversationalOnlyPrompt(prompt))
+            {
+                return false;
+            }
+
+            if (session.HasBuiltInCurrentSession &&
+                string.IsNullOrWhiteSpace(session.PendingPlanSummary) &&
+                IsFollowUpAlterationPrompt(prompt))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        public static string BuildPlanAndClarifySystem(CopilotWorkMode targetMode)
+        {
+            string modeLabel = targetMode == CopilotWorkMode.RhinoDirect
+                ? "Direct Rhino 8 Mode (creating/editing native Rhino geometry, layers, colors, and viewport)"
+                : "Grasshopper Parametric Mode (building/patching parametric Grasshopper nodes or Python 3 scripts)";
+
+            return $"""
+                You are GH Copilot, an expert Rhino 8 & Grasshopper computational architect texting with the user in a conversational WhatsApp-style chat.
+                Currently active mode: {modeLabel}.
+                IMPORTANT: Do NOT generate or output executable JSON yet. First collaborate with the user so you are 100% sure what they want:
+                1. Inspect the attached live Rhino viewport screenshot (if provided), RHINO VIEWPORT & SCENE CONTEXT, and ACTIVE CANVAS CONTEXT.
+                2. Briefly confirm what you understand they want to create or modify.
+                3. ALWAYS include a clean visual ASCII / Unicode schematic diagram inside a fenced block:
+                   ```diagram
+                   ...
+                   ```
+                   Use box-drawing characters (┌ ─ ┐ │ └ ┘ ──► ▼) to sketch either the 2D/3D spatial geometry + key dimensions/axes OR the parametric component/Python flow. Keep each diagram line under 44 characters so it fits crisply inside a chat bubble.
+                4. Outline a concise 2–4 step build plan (key dimensions/units, parametric sliders or Python script, layers/colors).
+                5. Ask 1–3 brief, targeted clarifying questions if any dimensions, counts, style, or materials are open — and let the user know they can reply to tweak the plan or click '✓ Approve & Build' (or reply "build it") to run it immediately.
+                """;
+        }
+
+        public static string BuildEffectiveExecutionPrompt(string rawUserPrompt, ChatSession session)
+        {
+            if (session is null) throw new ArgumentNullException(nameof(session));
+            string trimmed = (rawUserPrompt ?? string.Empty).Trim();
+
+            var sb = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(session.PendingPlanSummary))
+            {
+                sb.AppendLine("USER APPROVED THIS PLAN — EXECUTE IT ACCURATELY IN FULL:");
+                sb.AppendLine(RedactGuids(session.PendingPlanSummary.Trim()));
+                sb.AppendLine();
+
+                var userRequirements = session.Messages
+                    .Where(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase))
+                    .Select(m => m.Content)
+                    .Where(c => !string.IsNullOrWhiteSpace(c))
+                    .Take(6)
+                    .ToList();
+                if (userRequirements.Count > 0)
+                {
+                    sb.AppendLine("EARLIER USER REQUIREMENTS IN THIS CHAT:");
+                    foreach (string req in userRequirements)
+                    {
+                        sb.AppendLine("- " + RedactGuids(req.Trim()));
+                    }
+                    sb.AppendLine();
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(session.LastExecutedSummary) && IsFollowUpAlterationPrompt(trimmed))
+            {
+                sb.AppendLine("FOLLOW-UP ALTERATION TO EXISTING WORK:");
+                sb.AppendLine(RedactGuids(session.LastExecutedSummary.Trim()));
+                sb.AppendLine();
+            }
+
+            sb.Append("CURRENT USER REQUEST: ");
+            sb.Append(trimmed);
+            return sb.ToString();
+        }
+
+        public static string BuildRetrievalQuery(ChatSession session, string currentPrompt)
+        {
+            if (session is null) throw new ArgumentNullException(nameof(session));
+
+            var parts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(currentPrompt))
+            {
+                parts.Add(currentPrompt.Trim());
+            }
+
+            if (!string.IsNullOrWhiteSpace(session.PendingPlanSummary))
+            {
+                parts.Add(session.PendingPlanSummary);
+            }
+
+            int start = Math.Max(0, session.Messages.Count - 4);
+            for (int i = start; i < session.Messages.Count; i++)
+            {
+                string content = session.Messages[i].Content;
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    parts.Add(content);
+                }
+            }
+
+            return string.Join(" ", parts);
         }
 
         private static (string CompactJsonText, Dictionary<CanvasNodeSnapshot, string> NodeIds) SerializeCompactGraph(
@@ -265,7 +436,7 @@ namespace GhCopilot.Core.Llm
             sb.AppendLine("The following output-mode instructions supersede the GraphSpec-only generation wording above; all component, wiring and script safety rules still apply.");
             sb.AppendLine("CRITICAL: If the user message is a greeting, small talk, or a conversational question that does not ask to create or modify Grasshopper components, return empty nodes/wires (or ops: []) and put your answer in 'explanation'. Never place 'Selected Rhino Objects' or 'Model Object' unless explicitly requested.");
             sb.AppendLine(patchOnly
-                ? "PATCH ONLY: Return only a GraphPatch JSON matching the supplied schema, never a replacement GraphSpec. Reference existing nodes by stable n IDs; change only what the current request requires. In ops[], OMIT unused properties instead of setting them to null (e.g. add_node has only op+node; set_param has only op+nodeId+settings; wire/unwire has only op+wire; delete_node has only op+nodeId; omit unchanged settings keys). To answer a conversational question without modifying the canvas, return {\"ops\":[],\"explanation\":\"...\"}."
+                ? "PATCH ONLY: Return only a GraphPatch JSON matching the supplied schema, never a replacement GraphSpec. Reference existing nodes by stable n IDs; change only what the current request requires. To update an existing Python 3 Script node's code, use set_param with nodeId and settings.text containing the complete updated Python code (and set_param value/min/max for sliders). In ops[], OMIT unused properties instead of setting them to null (e.g. add_node has only op+node; set_param has only op+nodeId+settings; wire/unwire has only op+wire; delete_node has only op+nodeId; omit unchanged settings keys). To answer a conversational question without modifying the canvas, return {\"ops\":[],\"explanation\":\"...\"}."
                 : "Answer conversational questions clearly. When asked to create geometry, return GraphSpec JSON matching the supplied schema; reuse stable graph IDs when referring to existing nodes. To answer a conversational question without placing geometry, return {\"nodes\":[],\"wires\":[],\"explanation\":\"...\"}.");
             sb.AppendLine("SHORTLIST COMPONENTS:");
             // Retriever has no formatter; share the same record formatter used by PromptBuilder.

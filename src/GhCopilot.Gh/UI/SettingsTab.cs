@@ -27,6 +27,7 @@ namespace GhCopilot.UI
         private readonly Button _verifyModelButton;
         private readonly Button _fetchModelsButton;
         private readonly TextBox _customEndpointBox;
+        private readonly TextBox _timeoutSecondsBox;
         private readonly TextBox _sharedFolderBox;
         private readonly CheckBox _sendCanvasDataCheck;
         private readonly CheckBox _autoLayoutCheck;
@@ -96,6 +97,14 @@ namespace GhCopilot.UI
             };
             CopilotTheme.StyleTextBox(_customEndpointBox);
 
+            _timeoutSecondsBox = new TextBox
+            {
+                Text = settings.RequestTimeoutSeconds.ToString(),
+                PlaceholderText = AppSettings.DefaultRequestTimeoutSeconds.ToString(),
+                ToolTip = "Timeout per LLM API call in seconds (30–600). Default is 180s."
+            };
+            CopilotTheme.StyleTextBox(_timeoutSecondsBox);
+
             var keyToolsRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
             keyToolsRow.BeginHorizontal();
             keyToolsRow.Add(_showKeyCheck, xscale: true);
@@ -118,6 +127,8 @@ namespace GhCopilot.UI
             apiCardLayout.Add(_fetchedModelsDropDown);
             apiCardLayout.Add(CopilotTheme.CreateLabel("Custom Endpoint URL (optional)", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()));
             apiCardLayout.Add(_customEndpointBox);
+            apiCardLayout.Add(CopilotTheme.CreateLabel("Request Timeout (seconds, 30–600)", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()));
+            apiCardLayout.Add(_timeoutSecondsBox);
             apiCardLayout.EndVertical();
             Panel apiCard = CopilotTheme.CreateCard(apiCardLayout, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 10);
 
@@ -392,6 +403,13 @@ namespace GhCopilot.UI
                 settings.Provider = provider;
                 settings.ModelId = modelId;
                 settings.CustomEndpointUrl = _customEndpointBox.Text?.Trim() ?? string.Empty;
+                int timeoutSec = settings.RequestTimeoutSeconds > 45 ? settings.RequestTimeoutSeconds : AppSettings.DefaultRequestTimeoutSeconds;
+                if (int.TryParse(_timeoutSecondsBox.Text?.Trim(), out int parsedTimeout))
+                {
+                    timeoutSec = Math.Max(30, Math.Min(600, parsedTimeout));
+                }
+                settings.RequestTimeoutSeconds = timeoutSec;
+                _timeoutSecondsBox.Text = timeoutSec.ToString();
                 settings.SharedLibraryFolder = _sharedFolderBox.Text?.Trim() ?? string.Empty;
                 settings.SendCanvasData = _sendCanvasDataCheck.Checked == true;
                 settings.AutoLayout = _autoLayoutCheck.Checked != false;

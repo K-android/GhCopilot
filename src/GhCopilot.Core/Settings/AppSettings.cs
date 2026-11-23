@@ -13,6 +13,7 @@ namespace GhCopilot.Core.Settings
     {
         public const string DefaultProvider = "Gemini";
         public const string DefaultModelId = "gemini-2.5-flash";
+        public const int DefaultRequestTimeoutSeconds = 180;
 
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
@@ -37,8 +38,11 @@ namespace GhCopilot.Core.Settings
         [JsonPropertyName("autoLayout")]
         public bool AutoLayout { get; set; } = true;
 
+        [JsonPropertyName("planFirstMode")]
+        public bool PlanFirstMode { get; set; } = true;
+
         [JsonPropertyName("requestTimeoutSeconds")]
-        public int RequestTimeoutSeconds { get; set; } = 45;
+        public int RequestTimeoutSeconds { get; set; } = DefaultRequestTimeoutSeconds;
 
         public static string GetDefaultSettingsPath()
         {
@@ -73,9 +77,9 @@ namespace GhCopilot.Core.Settings
                     loaded.ModelId = DefaultModelId;
                 }
 
-                if (loaded.RequestTimeoutSeconds < 5)
+                if (loaded.RequestTimeoutSeconds <= 45)
                 {
-                    loaded.RequestTimeoutSeconds = 45;
+                    loaded.RequestTimeoutSeconds = DefaultRequestTimeoutSeconds;
                 }
 
                 return loaded;

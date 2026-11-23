@@ -29,7 +29,7 @@ namespace GhCopilot.Rhino.Host
         private readonly GeminiClient _geminiClient = new GeminiClient();
         private readonly RhinoActionExecutor _executor = new RhinoActionExecutor();
 
-        public ChatSession Session { get; } = new ChatSession();
+        public ChatSession Session => CopilotHostRegistry.SharedSession;
 
         public bool CanUndoLastTurn => _executor.CanUndoLastTurn;
 
@@ -159,12 +159,12 @@ namespace GhCopilot.Rhino.Host
                 }
 
                 string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
-                ReportStage("🔭 Inspecting active Rhino 8 scene, layers & viewport...");
+                ReportStage("🔭 Inspecting active Rhino 8 scene, layers & live viewport image...");
                 (RhinoViewportSnapshot snapshot, IReadOnlyList<string> lastCreated) = await InvokeOnUiAsync(() =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     return (
-                        RhinoViewportInspector.InspectActiveDoc(),
+                        RhinoViewportInspector.InspectActiveDoc(captureImage: true),
                         _executor.DescribeLastCreated(RhinoDoc.ActiveDoc));
                 }).ConfigureAwait(false);
 
@@ -179,7 +179,7 @@ namespace GhCopilot.Rhino.Host
                     string explainPayload = RhinoPromptBuilder.BuildPayload(Session, snapshot, userText, lastCreated);
                     totalTokens = EstimateSend(explainSystem, explainPayload, null);
                     PayloadAuditLogger.LogSentPayload("RhinoExplain", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, explainSystem, explainPayload);
-                    ReportStage($"💭 Thinking: inspecting Rhino scene with {settings.ModelId}...");
+                    ReportStage($"💭 Thinking: inspecting live Rhino viewport with {settings.ModelId}...");
 
                     string explanationText = await _geminiClient.GenerateTextAsync(
                         apiKey!,
@@ -189,24 +189,33 @@ namespace GhCopilot.Rhino.Host
                         TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
                         cancellationToken,
                         settings.Provider,
-                        endpoint).ConfigureAwait(false);
+                        endpoint,
+                        snapshot.ViewportImageBase64Png).ConfigureAwait(false);
+
+                    string explainSummary = RhinoViewportSnapshot.BuildDiffSummary(null, snapshot);
+                    Session.LastViewportVerification = explainSummary;
 
                     return FinishTurn(userText, new CopilotGenerationResponse
                     {
                         IsSuccess = true,
                         StatusLine = "Rhino viewport & scene explained.",
                         Explanation = explanationText,
-                        EstimatedInputTokens = totalTokens
+                        EstimatedInputTokens = totalTokens,
+                        ViewportImageBase64Png = snapshot.ViewportImageBase64Png,
+                        ViewportVerificationSummary = explainSummary
                     });
                 }
 
-                if (ChatPromptBuilder.IsConversationalOnlyPrompt(trimmed))
+                bool approvingPendingPlan = !string.IsNullOrWhiteSpace(Session.PendingPlanSummary) &&
+                                            ChatPromptBuilder.IsApprovalOrBuildConfirmation(trimmed);
+
+                if (!approvingPendingPlan && ChatPromptBuilder.IsConversationalOnlyPrompt(trimmed))
                 {
                     string convSystem = RhinoPromptBuilder.BuildConversationalSystem();
                     string convPayload = RhinoPromptBuilder.BuildPayload(Session, snapshot, trimmed, lastCreated);
                     totalTokens = EstimateSend(convSystem, convPayload, null);
                     PayloadAuditLogger.LogSentPayload("RhinoConversational", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, convSystem, convPayload);
-                    ReportStage($"✉️ Asking {settings.ModelId} for a direct reply...");
+                    ReportStage($"✉️ Asking {settings.ModelId} (with live viewport view)...");
 
                     string reply = await _geminiClient.GenerateTextAsync(
                         apiKey!,
@@ -216,14 +225,55 @@ namespace GhCopilot.Rhino.Host
                         TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
                         cancellationToken,
                         settings.Provider,
-                        endpoint).ConfigureAwait(false);
+                        endpoint,
+                        snapshot.ViewportImageBase64Png).ConfigureAwait(false);
+
+                    string convSummary = RhinoViewportSnapshot.BuildDiffSummary(null, snapshot);
+                    Session.LastViewportVerification = convSummary;
 
                     return FinishTurn(userText, new CopilotGenerationResponse
                     {
                         IsSuccess = true,
                         StatusLine = "Replied directly (no Rhino scene changes).",
                         Explanation = reply,
-                        EstimatedInputTokens = totalTokens
+                        EstimatedInputTokens = totalTokens,
+                        ViewportImageBase64Png = snapshot.ViewportImageBase64Png,
+                        ViewportVerificationSummary = convSummary
+                    });
+                }
+
+                if (ChatPromptBuilder.ShouldPlanBeforeBuilding(trimmed, Session, settings.PlanFirstMode))
+                {
+                    string planSystem = ChatPromptBuilder.BuildPlanAndClarifySystem(CopilotWorkMode.RhinoDirect);
+                    string planPayload = RhinoPromptBuilder.BuildPayload(Session, snapshot, trimmed, lastCreated);
+                    totalTokens = EstimateSend(planSystem, planPayload, null);
+                    PayloadAuditLogger.LogSentPayload("RhinoPlanFirst", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, planSystem, planPayload);
+                    ReportStage($"🧠 Designing Rhino plan & schematic diagram with {settings.ModelId}...");
+
+                    string planReply = await _geminiClient.GenerateTextAsync(
+                        apiKey!,
+                        settings.ModelId,
+                        planSystem,
+                        planPayload,
+                        TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
+                        cancellationToken,
+                        settings.Provider,
+                        endpoint,
+                        snapshot.ViewportImageBase64Png).ConfigureAwait(false);
+
+                    Session.PendingPlanSummary = planReply;
+                    string planViewSummary = RhinoViewportSnapshot.BuildDiffSummary(null, snapshot);
+                    Session.LastViewportVerification = planViewSummary;
+
+                    return FinishTurn(userText, new CopilotGenerationResponse
+                    {
+                        IsSuccess = true,
+                        IsPlanProposal = true,
+                        StatusLine = "Plan & diagram ready — tap Approve & Build or reply to refine.",
+                        Explanation = planReply,
+                        EstimatedInputTokens = totalTokens,
+                        ViewportImageBase64Png = snapshot.ViewportImageBase64Png,
+                        ViewportVerificationSummary = planViewSummary
                     });
                 }
 
@@ -232,10 +282,11 @@ namespace GhCopilot.Rhino.Host
                     return FailureResponse("No active Rhino document is open.");
                 }
 
+                string effectiveUser = ChatPromptBuilder.BuildEffectiveExecutionPrompt(trimmed, Session);
                 JsonElement schema = RhinoActionSchema.Build();
                 string schemaRaw = schema.GetRawText();
                 string system = RhinoPromptBuilder.BuildSystem();
-                string basePayload = RhinoPromptBuilder.BuildPayload(Session, snapshot, trimmed, lastCreated);
+                string basePayload = RhinoPromptBuilder.BuildPayload(Session, snapshot, effectiveUser, lastCreated);
                 string currentPayload = basePayload;
                 string lastRaw = string.Empty;
                 var lastErrors = new List<string>();
@@ -272,7 +323,8 @@ namespace GhCopilot.Rhino.Host
                         TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
                         cancellationToken,
                         settings.Provider,
-                        endpoint).ConfigureAwait(false);
+                        endpoint,
+                        attempt == 0 ? snapshot.ViewportImageBase64Png : null).ConfigureAwait(false);
 
                     ReportStage("✅ Validating Rhino operations & coordinates...");
                     try
@@ -319,19 +371,27 @@ namespace GhCopilot.Rhino.Host
                 }
 
                 ReportStage($"⚡ Applying {validPlan.Ops.Count} operation(s) directly to Rhino...");
-                RhinoExecutionResult execResult = await InvokeOnUiAsync(() =>
+                (RhinoExecutionResult execResult, RhinoViewportSnapshot afterViewport) = await InvokeOnUiAsync(() =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     RhinoDoc? doc = RhinoDoc.ActiveDoc ?? throw new InvalidOperationException("Active Rhino document is unavailable.");
-                    return _executor.Execute(doc, validPlan);
+                    RhinoExecutionResult exec = _executor.Execute(doc, validPlan);
+                    RhinoViewportSnapshot after = RhinoViewportInspector.InspectActiveDoc(captureImage: true);
+                    return (exec, after);
                 }).ConfigureAwait(false);
 
                 RhinoStateChanged?.Invoke(this, EventArgs.Empty);
 
                 string summaryLine = BuildExecutionStatusLine(execResult);
+                string afterSummary = RhinoViewportSnapshot.BuildDiffSummary(snapshot, afterViewport);
                 string explanation = string.IsNullOrWhiteSpace(validPlan.Explanation)
                     ? summaryLine
                     : validPlan.Explanation + (execResult.AppliedNotes.Count > 0 ? $"\n({summaryLine})" : string.Empty);
+
+                Session.PendingPlanSummary = string.Empty;
+                Session.HasBuiltInCurrentSession = true;
+                Session.LastExecutedSummary = explanation;
+                Session.LastViewportVerification = afterSummary;
 
                 return FinishTurn(userText, new CopilotGenerationResponse
                 {
@@ -341,7 +401,9 @@ namespace GhCopilot.Rhino.Host
                     RuntimeMessages = execResult.Warnings.ToList(),
                     NodeCount = execResult.CreatedCount + execResult.ModifiedCount + execResult.DeletedCount,
                     AttemptsUsed = attemptsUsed,
-                    EstimatedInputTokens = totalTokens
+                    EstimatedInputTokens = totalTokens,
+                    ViewportImageBase64Png = afterViewport.ViewportImageBase64Png,
+                    ViewportVerificationSummary = afterSummary
                 });
             }
             catch (OperationCanceledException)

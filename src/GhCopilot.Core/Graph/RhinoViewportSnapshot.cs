@@ -66,6 +66,30 @@ namespace GhCopilot.Core.Graph
         [JsonPropertyName("sampleObjects")]
         public List<string> SampleObjects { get; set; } = new List<string>();
 
+        [JsonIgnore]
+        public string? ViewportImageBase64Png { get; set; }
+
+        public static string BuildDiffSummary(RhinoViewportSnapshot? before, RhinoViewportSnapshot? after)
+        {
+            if (after == null || !after.HasActiveDocument)
+            {
+                return "Viewport unavailable (no active Rhino document).";
+            }
+
+            string countPart = $"{after.TotalVisibleObjects} visible object(s)";
+            if (before != null && before.HasActiveDocument)
+            {
+                int delta = after.TotalVisibleObjects - before.TotalVisibleObjects;
+                if (delta > 0) countPart += $" (+{delta} new)";
+                else if (delta < 0) countPart += $" ({delta})";
+            }
+
+            string view = string.IsNullOrWhiteSpace(after.ActiveViewName) ? "Viewport" : after.ActiveViewName;
+            string mode = string.IsNullOrWhiteSpace(after.DisplayMode) ? "Default" : after.DisplayMode;
+            string bounds = string.IsNullOrWhiteSpace(after.SceneBoundingBox) ? "none" : after.SceneBoundingBox;
+            return $"Viewport verified: {countPart}, Selected={after.SelectedObjectCount}, View={view} ({mode}), SceneBounds={bounds}";
+        }
+
         public string FormatForPrompt()
         {
             if (!HasActiveDocument)

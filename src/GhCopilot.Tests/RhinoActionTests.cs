@@ -1,10 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using GhCopilot.Core.Graph;
 using GhCopilot.Core.Host;
+using GhCopilot.Core.Index;
 using GhCopilot.Core.Llm;
 using GhCopilot.Core.Rhino;
+using GhCopilot.Core.Settings;
 using Xunit;
 
 namespace GhCopilot.Tests
@@ -185,6 +193,213 @@ namespace GhCopilot.Tests
             bool expectedConversational)
         {
             Assert.Equal(expectedConversational, ChatPromptBuilder.IsConversationalOnlyPrompt(prompt));
+        }
+
+        [Fact]
+        public void AppSettings_DefaultTimeoutIs180_AndUpgradesLegacy45SecondSetting()
+        {
+            var fresh = new AppSettings();
+            Assert.Equal(180, fresh.RequestTimeoutSeconds);
+            Assert.True(fresh.PlanFirstMode);
+
+            string tempDir = Path.Combine(Path.GetTempPath(), "GhCopilotTimeout_" + Guid.NewGuid().ToString("N"));
+            string settingsPath = Path.Combine(tempDir, "settings.json");
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                File.WriteAllText(settingsPath, "{\"provider\":\"Gemini\",\"modelId\":\"gemini-2.5-flash\",\"requestTimeoutSeconds\":45}", Encoding.UTF8);
+                AppSettings upgraded = AppSettings.Load(settingsPath);
+                Assert.Equal(180, upgraded.RequestTimeoutSeconds);
+            }
+            finally
+            {
+                if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+            }
+        }
+
+        [Fact]
+        public void PlanFirst_DetectsNewRequests_Approvals_AndFollowUpAlterations()
+        {
+            var session = new ChatSession();
+
+            Assert.True(ChatPromptBuilder.ShouldPlanBeforeBuilding("design a pavilion canopy with columns", session, planFirstEnabled: true));
+            Assert.False(ChatPromptBuilder.ShouldPlanBeforeBuilding("design a pavilion canopy with columns", session, planFirstEnabled: false));
+            Assert.False(ChatPromptBuilder.ShouldPlanBeforeBuilding("hi there", session, planFirstEnabled: true));
+
+            Assert.True(ChatPromptBuilder.IsApprovalOrBuildConfirmation("yes"));
+            Assert.True(ChatPromptBuilder.IsApprovalOrBuildConfirmation("looks good, build it"));
+            Assert.True(ChatPromptBuilder.IsApprovalOrBuildConfirmation("[Approve & Build] Yes, approved — build the planned design now."));
+            Assert.False(ChatPromptBuilder.IsApprovalOrBuildConfirmation("create a twisted tower"));
+
+            session.PendingPlanSummary = "Step 1: create 20x20x10 plinth; Step 2: 4 columns";
+            session.CompleteTurn("design a pavilion", session.PendingPlanSummary);
+            Assert.False(ChatPromptBuilder.ShouldPlanBeforeBuilding("Approve & Build", session, planFirstEnabled: true));
+            Assert.False(ChatPromptBuilder.ShouldPlanBeforeBuilding("yes", session, planFirstEnabled: true));
+
+            string effective = ChatPromptBuilder.BuildEffectiveExecutionPrompt("yes", session);
+            Assert.Contains("USER APPROVED THIS PLAN", effective);
+            Assert.Contains("Step 1: create 20x20x10 plinth", effective);
+            Assert.Contains("design a pavilion", effective);
+
+            string retrieval = ChatPromptBuilder.BuildRetrievalQuery(session, "yes");
+            Assert.Contains("plinth", retrieval);
+
+            session.PendingPlanSummary = string.Empty;
+            session.HasBuiltInCurrentSession = true;
+            session.LastExecutedSummary = "Built pavilion plinth and 4 columns";
+            Assert.True(ChatPromptBuilder.IsFollowUpAlterationPrompt("now make it taller and color it red"));
+            Assert.False(ChatPromptBuilder.ShouldPlanBeforeBuilding("now make it taller and color it red", session, planFirstEnabled: true));
+
+            string followUp = ChatPromptBuilder.BuildEffectiveExecutionPrompt("now make it taller", session);
+            Assert.Contains("FOLLOW-UP ALTERATION TO EXISTING WORK", followUp);
+            Assert.Contains("Built pavilion plinth", followUp);
+
+            string planSystem = ChatPromptBuilder.BuildPlanAndClarifySystem(CopilotWorkMode.RhinoDirect);
+            Assert.Contains("```diagram", planSystem);
+        }
+
+        [Fact]
+        public void RhinoViewportSnapshot_BuildDiffSummary_ReportsBeforeAfterChanges_AndIgnoresImageInJson()
+        {
+            var before = new RhinoViewportSnapshot
+            {
+                HasActiveDocument = true,
+                TotalVisibleObjects = 2,
+                ActiveViewName = "Perspective",
+                DisplayMode = "Wireframe",
+                SceneBoundingBox = "(0.00, 0.00, 0.00)..(5.00, 5.00, 5.00)"
+            };
+
+            var after = new RhinoViewportSnapshot
+            {
+                HasActiveDocument = true,
+                TotalVisibleObjects = 6,
+                SelectedObjectCount = 1,
+                ActiveViewName = "Perspective",
+                DisplayMode = "Shaded",
+                SceneBoundingBox = "(0.00, 0.00, 0.00)..(24.00, 24.00, 15.00)",
+                ViewportImageBase64Png = "AAAA"
+            };
+
+            string diff = RhinoViewportSnapshot.BuildDiffSummary(before, after);
+            Assert.Contains("6 visible object(s) (+4 new)", diff);
+            Assert.Contains("Selected=1", diff);
+            Assert.Contains("Perspective (Shaded)", diff);
+
+            string json = JsonSerializer.Serialize(after);
+            Assert.DoesNotContain("ViewportImageBase64Png", json);
+            Assert.DoesNotContain("AAAA", json);
+        }
+
+        [Fact]
+        public void GraphPatchValidator_AllowsTextUpdateOnPythonScriptNodes_AndRejectsUnsafeScriptCode()
+        {
+            var snapshot = new CanvasSnapshot
+            {
+                Nodes = new List<CanvasNodeSnapshot>
+                {
+                    new CanvasNodeSnapshot
+                    {
+                        Id = "s1",
+                        Name = "Python 3 Script",
+                        ShortId = "py3",
+                        Outputs = new List<ParamRecord> { new ParamRecord { Name = "geo", NickName = "geo", TypeName = "Geometry" } }
+                    }
+                }
+            };
+            var shortlist = new List<ComponentRecord>
+            {
+                new ComponentRecord { ShortId = "py3", Name = "Python 3 Script" }
+            };
+
+            var validPatch = new GraphPatch
+            {
+                Explanation = "Double sphere radius",
+                Ops = new List<GraphPatchOp>
+                {
+                    new GraphPatchOp
+                    {
+                        Op = "set_param",
+                        NodeId = "s1",
+                        Settings = new NodeSettings { Text = "import Rhino.Geometry as rg\ngeo = rg.Sphere(rg.Point3d.Origin, 10.0)" }
+                    }
+                }
+            };
+            Assert.True(GraphPatchValidator.Validate(validPatch, snapshot, shortlist).IsValid);
+
+            var unsafePatch = new GraphPatch
+            {
+                Explanation = "Unsafe import",
+                Ops = new List<GraphPatchOp>
+                {
+                    new GraphPatchOp
+                    {
+                        Op = "set_param",
+                        NodeId = "s1",
+                        Settings = new NodeSettings { Text = "import os\ngeo = None" }
+                    }
+                }
+            };
+            PatchValidationResult bad = GraphPatchValidator.Validate(unsafePatch, snapshot, shortlist);
+            Assert.False(bad.IsValid);
+            Assert.Contains(bad.Errors, e => e.Contains("Unsafe", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public async Task GeminiClient_SupportsMultimodalImageBase64Attachment()
+        {
+            string? capturedBody = null;
+            int callCount = 0;
+
+            var handler = new StubHttpHandler(req =>
+            {
+                callCount++;
+                capturedBody = req.Content != null ? req.Content.ReadAsStringAsync().Result : null;
+                string responseJson = JsonSerializer.Serialize(new
+                {
+                    candidates = new[]
+                    {
+                        new { content = new { parts = new[] { new { text = "I see a shaded box in Perspective." } } } }
+                    }
+                });
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using var http = new HttpClient(handler);
+            using var client = new GeminiClient(http);
+            string reply = await client.GenerateTextAsync(
+                "AIzaSy-TestKey-1234",
+                "gemini-2.5-flash",
+                "Inspect viewport.",
+                "What do you see?",
+                TimeSpan.FromSeconds(10),
+                CancellationToken.None,
+                "Gemini",
+                null,
+                "iVBORw0KGgo=");
+
+            Assert.Equal(1, callCount);
+            Assert.Equal("I see a shaded box in Perspective.", reply);
+            Assert.NotNull(capturedBody);
+            Assert.Contains("inline_data", capturedBody);
+            Assert.Contains("image/png", capturedBody);
+            Assert.Contains("iVBORw0KGgo=", capturedBody);
+        }
+
+        private sealed class StubHttpHandler : HttpMessageHandler
+        {
+            private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
+
+            public StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder)
+            {
+                _responder = responder;
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+                Task.FromResult(_responder(request));
         }
     }
 }

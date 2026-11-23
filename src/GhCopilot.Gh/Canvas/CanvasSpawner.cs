@@ -445,6 +445,10 @@ namespace GhCopilot.Gh.Canvas
             {
                 panel.SetUserText(node.Settings.Text);
             }
+            else if (node.Settings.Text != null && PythonScriptSpawner.IsPythonScriptObject(instance))
+            {
+                PythonScriptSpawner.TryUpdateCode(instance, node.Settings.Text);
+            }
 
             if (!string.IsNullOrWhiteSpace(node.Settings.Nickname))
             {

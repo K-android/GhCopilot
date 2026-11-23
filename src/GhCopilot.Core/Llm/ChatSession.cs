@@ -43,6 +43,14 @@ namespace GhCopilot.Core.Llm
         public List<Guid> LastSpawnedNodeIds { get; } = new List<Guid>();
         /// <summary>Latest validator/runtime diagnostics, not the conversation transcript.</summary>
         public List<string> LastMessages { get; } = new List<string>();
+        /// <summary>Latest proposed plan text awaiting user approval in Plan-First mode.</summary>
+        public string PendingPlanSummary { get; set; } = string.Empty;
+        /// <summary>Concise summary of the latest build or edit executed in this session.</summary>
+        public string LastExecutedSummary { get; set; } = string.Empty;
+        /// <summary>Latest viewport before/after verification summary.</summary>
+        public string LastViewportVerification { get; set; } = string.Empty;
+        /// <summary>True once at least one build/edit has been executed in the current session.</summary>
+        public bool HasBuiltInCurrentSession { get; set; }
 
         public string GetNodeId(Guid instanceGuid)
         {
@@ -100,6 +108,10 @@ namespace GhCopilot.Core.Llm
             LastSpawnedNodeIds.Clear();
             LastMessages.Clear();
             Summary = string.Empty;
+            PendingPlanSummary = string.Empty;
+            LastExecutedSummary = string.Empty;
+            LastViewportVerification = string.Empty;
+            HasBuiltInCurrentSession = false;
             _foldedTurns = 0;
             _nextNodeId = 1;
         }

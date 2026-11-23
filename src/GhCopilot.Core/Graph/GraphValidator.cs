@@ -313,28 +313,37 @@ namespace GhCopilot.Core.Graph
             return result;
         }
 
+        public static string? ValidateScriptCodeOnly(string? code)
+        {
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                return "Script block must contain non-empty Python 3 code.";
+            }
+
+            foreach ((Regex pattern, string reason) in UnsafeScriptPatterns)
+            {
+                Match match = pattern.Match(code!);
+                if (match.Success)
+                {
+                    return $"Unsafe script token '{match.Value.Trim()}': {reason}";
+                }
+            }
+
+            return null;
+        }
+
         private static void ValidateScript(ScriptSpec script, ValidationResult result)
         {
-            if (string.IsNullOrWhiteSpace(script.Code))
+            string? codeError = ValidateScriptCodeOnly(script.Code);
+            if (codeError != null)
             {
+                ValidationErrorCode errCode = string.IsNullOrWhiteSpace(script.Code)
+                    ? ValidationErrorCode.InvalidScriptSpec
+                    : ValidationErrorCode.UnsafeScriptCode;
                 result.Errors.Add(new ValidationIssue(
-                    ValidationErrorCode.InvalidScriptSpec,
-                    "Script block must contain non-empty Python 3 code.",
+                    errCode,
+                    codeError,
                     nodeId: ScriptNodeId));
-            }
-            else
-            {
-                foreach ((Regex pattern, string reason) in UnsafeScriptPatterns)
-                {
-                    Match match = pattern.Match(script.Code);
-                    if (match.Success)
-                    {
-                        result.Errors.Add(new ValidationIssue(
-                            ValidationErrorCode.UnsafeScriptCode,
-                            $"Unsafe script token '{match.Value.Trim()}': {reason}",
-                            nodeId: ScriptNodeId));
-                    }
-                }
             }
 
             if (script.Outputs is null || script.Outputs.Count == 0)

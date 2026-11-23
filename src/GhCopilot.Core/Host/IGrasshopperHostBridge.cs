@@ -18,6 +18,9 @@ namespace GhCopilot.Core.Host
         public int WireCount { get; set; }
         public int AttemptsUsed { get; set; }
         public int EstimatedInputTokens { get; set; }
+        public string? ViewportImageBase64Png { get; set; }
+        public string ViewportVerificationSummary { get; set; } = string.Empty;
+        public bool IsPlanProposal { get; set; }
     }
 
     /// <summary>
