@@ -26,6 +26,11 @@ Create, deform, boolean, organize, and render native Rhino 8 geometry directly v
 - **Live Viewport Vision**: Captures the active Rhino viewport before and after turns for the LLM to inspect and verify geometry (without cluttering chat bubbles with screenshots). Use **👁️ Verify Viewport** anytime to ask the AI to inspect the live scene.
 - **Generous Request Timeout**: Defaults to **180s** (configurable in Settings).
 
+### 4. Standalone-First + Optional Headless Bridge
+- **Standalone by Default**: Runs independently inside **Rhino 8** and **Rhino.Inside.Revit** with zero dependency on Revit add-ins or BIM Control Room.
+- **Headless NamedPipe Bridge (`GhCopilot.Headless.<PID>`)**: Automatically exposes a local NamedPipe server (`HeadlessBridgeServer` + `GhCopilotHeadless` command) so external orchestrators such as **BIM Command Center** can route Grasshopper/Rhino prompts to the active Rhino or Rhino.Inside.Revit session.
+- **Shared Key & Endpoint Settings**: Uses `SharedCopilotPaths` and DPAPI-encrypted `SecretStore` (`%LOCALAPPDATA%\GhCopilot\`) and supports `--company-endpoint <url>` in the installer so shared credentials and optional Control Room endpoints stay synchronized.
+
 ---
 
 ## One-Click Install
@@ -42,8 +47,8 @@ See [docs/INSTALL.md](docs/INSTALL.md) and [docs/CHAT.md](docs/CHAT.md) for full
 
 ## Solution Architecture
 
-- `src/GhCopilot.Core/` (`net7.0;net48`): Zero Rhino/Grasshopper dependencies — `IndexStore`, `Retriever` (BM25 + plugin/Revit/company boosting), `CompanyLibraryScanner`, `GraphSpec`, `GraphPatch`, `TypeCompat`, `GraphValidator`, `SchemaBuilder`, `PromptBuilder`, `ChatPromptBuilder`, `RhinoActionPlan`, `RhinoPromptBuilder`, `GeminiClient` (multimodal Gemini/Claude/OpenAI), `RepairLoop`, `SecretStore` (DPAPI), `AppSettings`, `PayloadAuditLogger`.
-- `src/GhCopilot.Rhino/` (`net48;net7.0-windows` → `.rhp`): Native Rhino 8 `PlugIn` (`LoadTime.AtStartup`), `GhCopilot` command, `RhinoHostBridge`, `RhinoActionExecutor`, and dockable `CopilotDockPanel`.
+- `src/GhCopilot.Core/` (`net8.0;net7.0;net48`): Zero Rhino/Grasshopper dependencies — `IndexStore`, `Retriever` (BM25 + plugin/Revit/company boosting), `CompanyLibraryScanner`, `GraphSpec`, `GraphPatch`, `TypeCompat`, `GraphValidator`, `SchemaBuilder`, `PromptBuilder`, `ChatPromptBuilder`, `RhinoActionPlan`, `RhinoPromptBuilder`, `IActionPlan`, `HeadlessProtocol`, `LlmClient` (multimodal Gemini/Claude/OpenAI with token/duration tracking), `RepairLoop`, `SecretStore` (DPAPI), `SharedCopilotPaths`, `AppSettings`, `PayloadAuditLogger`.
+- `src/GhCopilot.Rhino/` (`net48;net7.0-windows` → `.rhp`): Native Rhino 8 `PlugIn` (`LoadTime.AtStartup`), `GhCopilot` command, `GhCopilotHeadlessCommand`, `HeadlessBridgeServer`, `RhinoHostBridge`, `RhinoActionExecutor`, and dockable `CopilotDockPanel`.
 - `src/GhCopilot.Gh/` (`net48;net7.0-windows` → `.gha`): `GH_AssemblyInfo`, `GH_AssemblyPriority`, `ProxyScanner`, `ParamHydrator`, `UserObjectFolderLoader`, `GrasshopperHostBridge`, `ChatTurnTransaction`, `CanvasSpawner`, `WireConnector`, `GroupPreview`, `CanvasSerializer`, `RhinoViewportInspector`, `PythonScriptSpawner`, and `Eto.Forms` UI (`CopilotPanel`, `PromptTab`, `WhatsAppChatControl`, `SettingsTab`, `PreviewBar`).
 - `src/GhCopilot.Tests/` (`xunit`): Automated unit tests (`dotnet test`).
 - `tools/`: `deploy.ps1`, `build-yak.ps1`, `build-installer.ps1`, `UiSmokeTest/`, and `Installer/`.
