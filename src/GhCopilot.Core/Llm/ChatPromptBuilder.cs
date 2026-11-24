@@ -55,6 +55,18 @@ namespace GhCopilot.Core.Llm
             @"(?i)\b(?:whole|entire|full|existing|current|open)\s+(?:file|canvas|definition|graph|document|script)\b|\binspect\s+(?:this|the|my)?\s*(?:file|canvas|definition|graph|document|it)\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        private static readonly Regex RhinoSelectionConsentRegex = new Regex(
+            @"\b(?:use\s+(?:my\s+|the\s+)?(?:rhino\s+)?select(?:ed|ion)|rhino\s+selection|selected\s+(?:rhino\s+)?(?:object|objects|geometry|curve|curves|brep|breps|surface|surfaces|mesh|meshes|point|points|subd)|from\s+(?:my\s+|the\s+)?selection|bind\s+(?:my\s+|the\s+)?selection|selection\s+inputs?|(?:place|add|put|create|insert)\s+(?:a\s+|an\s+|some\s+)?(?:curve|brep|surface|mesh|point|geometry|selection)\s+inputs?)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex ExplicitPythonRequestRegex = new Regex(
+            @"\b(?:python|ghpython|\.py\b|py\s+script|python\s*3?\s*script|write\s+a\s+script|code\s+component)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex DirectInputWidgetPlacementRegex = new Regex(
+            @"\b(?:place|add|put|insert|drop|create)\s+(?:a\s+|an\s+|some\s+|two\s+|three\s+|\d+\s+)?(?:number\s+sliders?|sliders?|panels?|panel\s+inputs?|boolean\s+toggles?|toggles?|value\s+lists?|buttons?|(?:curve|brep|surface|mesh|point|geometry|selection)\s+(?:inputs?|params?|parameters?)|selection\s+inputs?)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         private static readonly JsonSerializerOptions CompactJson = new JsonSerializerOptions
         {
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -135,6 +147,16 @@ namespace GhCopilot.Core.Llm
             return !string.IsNullOrWhiteSpace(prompt) && WholeCanvasRegex.IsMatch(prompt!);
         }
 
+        public static bool RequestsRhinoSelectionInPrompt(string? prompt)
+        {
+            return !string.IsNullOrWhiteSpace(prompt) && RhinoSelectionConsentRegex.IsMatch(prompt!);
+        }
+
+        public static bool ExplicitlyRequestsPythonScript(string? prompt)
+        {
+            return !string.IsNullOrWhiteSpace(prompt) && ExplicitPythonRequestRegex.IsMatch(prompt!);
+        }
+
         public static bool IsApprovalOrBuildConfirmation(string? prompt)
         {
             if (string.IsNullOrWhiteSpace(prompt))
@@ -178,6 +200,12 @@ namespace GhCopilot.Core.Llm
             if (session.HasBuiltInCurrentSession &&
                 string.IsNullOrWhiteSpace(session.PendingPlanSummary) &&
                 IsFollowUpAlterationPrompt(prompt))
+            {
+                return false;
+            }
+
+            int words = prompt!.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+            if (words <= 20 && DirectInputWidgetPlacementRegex.IsMatch(prompt))
             {
                 return false;
             }
@@ -468,10 +496,10 @@ namespace GhCopilot.Core.Llm
             sb.AppendLine("COMPACT GRAPH JSON reflects the selected or open Grasshopper definition. RHINO VIEWPORT & SCENE CONTEXT reflects the live Rhino 8 viewport, camera, visible layers, units, and object bounding boxes.");
             sb.AppendLine("Graph instance IDs n1, n2, ... are stable within this chat; node type is its shortlist short ID. Wire endpoints absent from nodes are external context; do not invent their metadata.");
             sb.AppendLine("The following output-mode instructions supersede the GraphSpec-only generation wording above; all component, wiring and script safety rules still apply.");
-            sb.AppendLine("CRITICAL: If the user message is a greeting, small talk, or a conversational question that does not ask to create or modify Grasshopper components, return empty nodes/wires (or ops: []) and put your answer in 'explanation'. Never place 'Selected Rhino Objects' or 'Model Object' unless explicitly requested.");
+            sb.AppendLine("CRITICAL: If the user message is a greeting, small talk, or a conversational question that does not ask to create or modify Grasshopper components, return empty nodes/wires (or ops: []) and put your answer in 'explanation'. When the user asks to place sliders, panel inputs, toggles, or selection/geometry input parameters (Curve, Brep, Surface, Mesh, Point, Geometry), ALWAYS place those exact nodes from SHORTLIST COMPONENTS.");
             sb.AppendLine(patchOnly
-                ? "PATCH ONLY: Return only a GraphPatch JSON matching the supplied schema, never a replacement GraphSpec. Reference existing nodes by stable n IDs; change only what the current request requires. To update an existing Python 3 Script node's code, use set_param with nodeId and settings.text containing the complete updated Python code (and set_param value/min/max for sliders). In ops[], OMIT unused properties instead of setting them to null (e.g. add_node has only op+node; set_param has only op+nodeId+settings; wire/unwire has only op+wire; delete_node has only op+nodeId; omit unchanged settings keys). To answer a conversational question without modifying the canvas, return {\"ops\":[],\"explanation\":\"...\"}."
-                : "Answer conversational questions clearly. When asked to create geometry, return GraphSpec JSON matching the supplied schema; reuse stable graph IDs when referring to existing nodes. To answer a conversational question without placing geometry, return {\"nodes\":[],\"wires\":[],\"explanation\":\"...\"}.");
+                ? "PATCH ONLY: Return only a GraphPatch JSON matching the supplied schema, never a replacement GraphSpec. Reference existing nodes by stable n IDs; change only what the current request requires. You may add as many nodes and wires as needed using add_node and wire ops (including Number Slider with settings {min,max,value,decimals,nickname}, Panel with settings {text,nickname}, and Params>Geometry inputs like Curve/Brep/Surface/Mesh/Point/Geometry). To update an existing Python 3 Script node's code, use set_param with nodeId and settings.text containing the complete updated Python code (and set_param value/min/max for sliders). In ops[], OMIT unused properties instead of setting them to null (e.g. add_node has only op+node; set_param has only op+nodeId+settings; wire/unwire has only op+wire; delete_node has only op+nodeId; omit unchanged settings keys). To answer a conversational question without modifying the canvas, return {\"ops\":[],\"explanation\":\"...\"}."
+                : "Answer conversational questions clearly. When asked to create geometry or place inputs, return GraphSpec JSON matching the supplied schema (up to 200 nodes using shortlisted native, third-party plugin, and Revit components, Number Sliders, Panels, and Geometry input params); reuse stable graph IDs when referring to existing nodes. To answer a conversational question without placing geometry, return {\"nodes\":[],\"wires\":[],\"explanation\":\"...\"}.");
             sb.AppendLine("SHORTLIST COMPONENTS:");
             // Retriever has no formatter; share the same record formatter used by PromptBuilder.
             foreach (ComponentRecord record in shortlist) sb.AppendLine(record.FormatPromptContextLine());

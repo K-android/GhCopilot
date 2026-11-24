@@ -52,8 +52,8 @@ namespace GhCopilot.Core.Graph
     /// </summary>
     public static class GraphValidator
     {
-        public const int MaxNodeCount = 50;
-        public const float MaxCoordinateMagnitude = 10000f;
+        public const int MaxNodeCount = 200;
+        public const float MaxCoordinateMagnitude = 25000f;
         public const string ScriptNodeId = "script";
 
         private static readonly Regex IndexedNamePattern = new Regex(@"^(?<name>.+)\[(?<index>\d+)\]$", RegexOptions.Compiled);
@@ -233,11 +233,16 @@ namespace GhCopilot.Core.Graph
                     continue;
                 }
 
-                ParamRecord? sourceParam = ResolveParam(sourceRecord.Outputs, wire.FromParam);
+                bool sourceStandalone = sourceRecord.IsStandaloneParam ||
+                                        string.Equals(sourceRecord.Name, "Panel", StringComparison.OrdinalIgnoreCase);
+                bool targetStandalone = targetRecord.IsStandaloneParam ||
+                                        string.Equals(targetRecord.Name, "Panel", StringComparison.OrdinalIgnoreCase);
+
+                ParamRecord? sourceParam = ResolveParam(sourceRecord.Outputs, wire.FromParam, sourceStandalone);
                 if (sourceParam is null)
                 {
                     bool matchesInput = !string.IsNullOrWhiteSpace(wire.FromParam) &&
-                                        ResolveParam(sourceRecord.Inputs, wire.FromParam) != null;
+                                        ResolveParam(sourceRecord.Inputs, wire.FromParam, sourceStandalone) != null;
 
                     if (sourceRecord.Outputs.Count == 0 || matchesInput)
                     {
@@ -257,11 +262,11 @@ namespace GhCopilot.Core.Graph
                     }
                 }
 
-                ParamRecord? targetParam = ResolveParam(targetRecord.Inputs, wire.ToParam);
+                ParamRecord? targetParam = ResolveParam(targetRecord.Inputs, wire.ToParam, targetStandalone);
                 if (targetParam is null)
                 {
                     bool matchesOutput = !string.IsNullOrWhiteSpace(wire.ToParam) &&
-                                         ResolveParam(targetRecord.Outputs, wire.ToParam) != null;
+                                         ResolveParam(targetRecord.Outputs, wire.ToParam, targetStandalone) != null;
 
                     if (targetRecord.Inputs.Count == 0 || matchesOutput)
                     {
@@ -432,7 +437,7 @@ namespace GhCopilot.Core.Graph
             return record;
         }
 
-        private static ParamRecord? ResolveParam(IReadOnlyList<ParamRecord> parameters, string? paramSpec)
+        private static ParamRecord? ResolveParam(IReadOnlyList<ParamRecord> parameters, string? paramSpec, bool allowTypeNameMatch = false)
         {
             if (parameters.Count == 0)
             {
@@ -471,6 +476,13 @@ namespace GhCopilot.Core.Graph
                 {
                     return p;
                 }
+            }
+
+            if (allowTypeNameMatch &&
+                parameters.Count == 1 &&
+                string.Equals(parameters[0].TypeName, spec, StringComparison.OrdinalIgnoreCase))
+            {
+                return parameters[0];
             }
 
             if (int.TryParse(spec, out int index) && index >= 0 && index < parameters.Count)

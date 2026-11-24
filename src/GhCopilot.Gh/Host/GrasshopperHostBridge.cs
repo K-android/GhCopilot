@@ -379,7 +379,8 @@ namespace GhCopilot.Gh.Host
             CanvasSnapshot snapshot,
             string? userHint)
         {
-            var result = new List<ComponentRecord>(60);
+            const int maxShortlistSize = 100;
+            var result = new List<ComponentRecord>(maxShortlistSize);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (CanvasNodeSnapshot node in snapshot.Nodes)
@@ -401,9 +402,9 @@ namespace GhCopilot.Gh.Host
                 string.Join(" ", snapshot.Nodes.SelectMany(n => n.RuntimeMessages.Select(m => m.Message)))
             });
 
-            foreach (ComponentRecord candidate in Retriever.Retrieve(store.AllComponents, retrievalQuery, 60))
+            foreach (ComponentRecord candidate in Retriever.Retrieve(store.AllComponents, retrievalQuery, maxShortlistSize))
             {
-                if (result.Count >= 60)
+                if (result.Count >= maxShortlistSize)
                 {
                     break;
                 }

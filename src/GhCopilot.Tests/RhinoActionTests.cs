@@ -95,7 +95,7 @@ namespace GhCopilot.Tests
                 {
                     new RhinoActionOp { Op = "nuke_everything" },
                     new RhinoActionOp { Op = "add_sphere", Center = new[] { double.NaN, 0.0, 0.0 }, Radius = -3.0 },
-                    new RhinoActionOp { Op = "array_linear", Count = 500, Vector = new[] { 10.0, 0.0, 0.0 } },
+                    new RhinoActionOp { Op = "array_linear", Count = 1000, Vector = new[] { 10.0, 0.0, 0.0 } },
                     new RhinoActionOp { Op = "set_color", Target = "bogus_selector", Color = new[] { 300, -1, 128 } },
                     new RhinoActionOp { Op = "set_camera", CameraLocation = new[] { 5.0, 5.0, 5.0 }, CameraTarget = new[] { 5.0, 5.0, 5.0 } }
                 }
@@ -107,7 +107,7 @@ namespace GhCopilot.Tests
             Assert.Contains(validation.Errors, e => e.Contains("Unsupported", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(validation.Errors, e => e.Contains("Radius", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(validation.Errors, e => e.Contains("finite", StringComparison.OrdinalIgnoreCase));
-            Assert.Contains(validation.Errors, e => e.Contains("200", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(validation.Errors, e => e.Contains("500", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(validation.Errors, e => e.Contains("RGB", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(validation.Errors, e => e.Contains("Invalid target", StringComparison.OrdinalIgnoreCase));
             Assert.Contains(validation.Errors, e => e.Contains("identical", StringComparison.OrdinalIgnoreCase));
@@ -499,6 +499,220 @@ namespace GhCopilot.Tests
             string sysInstruction = PromptBuilder.BuildSystemInstruction();
             Assert.Contains("COMPONENT-FIRST PRIORITY", sysInstruction);
             Assert.Contains("AVOID UNNECESSARY PYTHON SCRIPTS", sysInstruction);
+        }
+
+        [Fact]
+        public void SchemaBuilder_OmitsScriptBlock_UnlessIncludeScriptIsTrue()
+        {
+            var shortlist = new List<ComponentRecord>
+            {
+                new ComponentRecord { ShortId = "c001", Name = "Number Slider" },
+                new ComponentRecord { ShortId = "c002", Name = "Panel" }
+            };
+
+            JsonElement nativeOnly = SchemaBuilder.BuildResponseJsonSchema(shortlist, includeScript: false);
+            JsonElement propsNoScript = nativeOnly.GetProperty("properties");
+            Assert.True(propsNoScript.TryGetProperty("nodes", out _));
+            Assert.True(propsNoScript.TryGetProperty("wires", out _));
+            Assert.False(propsNoScript.TryGetProperty("script", out _));
+
+            JsonElement withScript = SchemaBuilder.BuildResponseJsonSchema(shortlist, includeScript: true);
+            Assert.True(withScript.GetProperty("properties").TryGetProperty("script", out _));
+
+            Assert.False(ChatPromptBuilder.ExplicitlyRequestsPythonScript("create a diagrid facade with sliders"));
+            Assert.True(ChatPromptBuilder.ExplicitlyRequestsPythonScript("write a Python 3 script for a recursive fractal"));
+        }
+
+        [Fact]
+        public void GraphPatch_SanitizeLlmPatchJson_CleansNullsEmptySettingsAndSliderBounds_AndSchemaIncludesShortlistEnum()
+        {
+            var shortlist = new List<ComponentRecord>
+            {
+                new ComponentRecord
+                {
+                    ShortId = "c_slider",
+                    Name = "Number Slider",
+                    IsStandaloneParam = true,
+                    Outputs = new List<ParamRecord> { new ParamRecord { Name = "Number", NickName = "N", TypeName = "Number", Access = "item" } }
+                },
+                new ComponentRecord
+                {
+                    ShortId = "c_panel",
+                    Name = "Panel",
+                    IsStandaloneParam = true,
+                    Inputs = new List<ParamRecord> { new ParamRecord { Name = "Panel", NickName = "Panel", TypeName = "Text", Access = "item" } },
+                    Outputs = new List<ParamRecord> { new ParamRecord { Name = "Panel", NickName = "Panel", TypeName = "Text", Access = "item" } }
+                },
+                new ComponentRecord
+                {
+                    ShortId = "c_crv",
+                    Name = "Curve",
+                    Category = "Params",
+                    SubCategory = "Geometry",
+                    IsStandaloneParam = true,
+                    Inputs = new List<ParamRecord> { new ParamRecord { Name = "Curve", NickName = "Crv", TypeName = "Curve", Access = "item" } },
+                    Outputs = new List<ParamRecord> { new ParamRecord { Name = "Curve", NickName = "Crv", TypeName = "Curve", Access = "item" } }
+                },
+                new ComponentRecord
+                {
+                    ShortId = "c_circle",
+                    Name = "Circle",
+                    Inputs = new List<ParamRecord>
+                    {
+                        new ParamRecord { Name = "Plane", NickName = "P", TypeName = "Plane", Access = "item", Optional = true },
+                        new ParamRecord { Name = "Radius", NickName = "R", TypeName = "Number", Access = "item" }
+                    },
+                    Outputs = new List<ParamRecord> { new ParamRecord { Name = "Circle", NickName = "C", TypeName = "Circle", Access = "item" } }
+                }
+            };
+
+            JsonElement patchSchema = GraphPatchSchema.Build(shortlist);
+            JsonElement refEnum = patchSchema.GetProperty("properties").GetProperty("ops").GetProperty("items")
+                .GetProperty("properties").GetProperty("node").GetProperty("properties").GetProperty("ref").GetProperty("enum");
+            Assert.Equal(4, refEnum.GetArrayLength());
+
+            string noisyLlmJson = """
+                {
+                  "ops": [
+                    {
+                      "op": "add_node",
+                      "nodeId": null,
+                      "node": {
+                        "id": "n1",
+                        "ref": "c_slider",
+                        "x": 120,
+                        "y": 150,
+                        "settings": { "value": 250, "text": null, "nickname": "Height" }
+                      },
+                      "settings": null,
+                      "wire": null
+                    },
+                    {
+                      "op": "add_node",
+                      "node": {
+                        "id": "n2",
+                        "ref": "c_panel",
+                        "x": 120,
+                        "y": 240,
+                        "settings": { "text": "18.5", "min": null, "nickname": "" }
+                      }
+                    },
+                    {
+                      "op": "add_node",
+                      "node": {
+                        "id": "n3",
+                        "ref": "c_crv",
+                        "x": 120,
+                        "y": 330,
+                        "settings": {}
+                      }
+                    },
+                    {
+                      "op": "add_node",
+                      "node": {
+                        "id": "n4",
+                        "ref": "c_circle",
+                        "x": 360,
+                        "y": 240,
+                        "settings": {}
+                      }
+                    },
+                    {
+                      "op": "wire",
+                      "wire": { "fromNode": "n2", "fromParam": "Text", "toNode": "n4", "toParam": "Radius", "targetMapping": null }
+                    }
+                  ],
+                  "explanation": "Added slider, panel input, curve selection input, and circle."
+                }
+                """;
+
+            string sanitized = GraphPatch.SanitizeLlmPatchJson(noisyLlmJson);
+            GraphPatch? parsed = JsonSerializer.Deserialize<GraphPatch>(sanitized);
+            Assert.NotNull(parsed);
+            PatchValidationResult validation = GraphPatchValidator.Validate(parsed!, new CanvasSnapshot(), shortlist);
+            Assert.True(validation.IsValid, string.Join("; ", validation.Errors));
+        }
+
+        [Fact]
+        public void PanelInput_SelectionInputs_And200NodeLimit_ValidateAndRetrieveCleanly()
+        {
+            Assert.Equal(200, GraphValidator.MaxNodeCount);
+            Assert.True(TypeCompat.AreCompatible("Text", "Number"));
+            Assert.True(TypeCompat.AreCompatible("Text", "Integer"));
+            Assert.True(TypeCompat.AreCompatible("Text", "Point"));
+            Assert.True(TypeCompat.AreCompatible("Text", "Boolean"));
+            Assert.True(TypeCompat.AreCompatible("Curve", "Surface"));
+            Assert.True(ChatPromptBuilder.RequestsRhinoSelectionInPrompt("use my selected Rhino curve as input"));
+            Assert.True(ChatPromptBuilder.RequestsRhinoSelectionInPrompt("place a brep input and a slider"));
+            Assert.False(ChatPromptBuilder.ShouldPlanBeforeBuilding("place 2 sliders and a panel input", new ChatSession(), planFirstEnabled: true));
+
+            // Build a large 110-component corpus where 95 facade/plugin items all match the query,
+            // ensuring Number Slider, Panel, and Curve/Brep/Geometry selection params are STILL preserved!
+            var corpus = new List<ComponentRecord>
+            {
+                new ComponentRecord { ShortId = "c0001", Name = "Number Slider", Category = "Params", SubCategory = "Input", IsStandaloneParam = true },
+                new ComponentRecord { ShortId = "c0002", Name = "Panel", Category = "Params", SubCategory = "Input", IsStandaloneParam = true },
+                new ComponentRecord { ShortId = "c0003", Name = "Geometry", Category = "Params", SubCategory = "Geometry", IsStandaloneParam = true },
+                new ComponentRecord { ShortId = "c0004", Name = "Curve", Category = "Params", SubCategory = "Geometry", IsStandaloneParam = true },
+                new ComponentRecord { ShortId = "c0005", Name = "Brep", Category = "Params", SubCategory = "Geometry", IsStandaloneParam = true }
+            };
+            for (int i = 0; i < 95; i++)
+            {
+                corpus.Add(new ComponentRecord
+                {
+                    ShortId = $"p{i:D4}",
+                    Name = $"Diagrid Tower Truss Tool {i}",
+                    Category = "PluginTools",
+                    SubCategory = "Facade",
+                    Source = "plugin",
+                    LibraryName = "PluginTools",
+                    Description = "Parametric tower diagrid facade structure"
+                });
+            }
+
+            IReadOnlyList<ComponentRecord> retrieved = Retriever.Retrieve(corpus, "parametric tower diagrid facade structure", maxResults: 80);
+            Assert.Equal(80, retrieved.Count);
+            Assert.Contains(retrieved, c => c.Name == "Number Slider");
+            Assert.Contains(retrieved, c => c.Name == "Panel");
+            Assert.Contains(retrieved, c => c.Name == "Geometry" && c.IsStandaloneParam);
+            Assert.Contains(retrieved, c => c.Name == "Curve" && c.IsStandaloneParam);
+            Assert.Contains(retrieved, c => c.Name == "Brep" && c.IsStandaloneParam);
+        }
+
+        [Fact]
+        public void RhinoActionPlanValidator_AcceptsAllAdvancedArchitectural3DOperations_AndSupports250Ops()
+        {
+            Assert.Equal(250, RhinoActionPlanValidator.MaxOpsPerTurn);
+
+            var plan = new RhinoActionPlan
+            {
+                Explanation = "Twisted tapered tower with piped helix diagrid, revolved dome, boolean atrium cutout, and floor slabs.",
+                Ops = new List<RhinoActionOp>
+                {
+                    new RhinoActionOp { Op = "add_polygon", Center = new[] { 0.0, 0.0, 0.0 }, Radius = 14.0, Sides = 8, Inscribed = true, Name = "BaseOctagon" },
+                    new RhinoActionOp { Op = "extrude", Target = "name:BaseOctagon", Height = 60.0, Capped = true, Name = "TowerMass" },
+                    new RhinoActionOp { Op = "twist", Target = "name:TowerMass", AngleDegrees = 75.0 },
+                    new RhinoActionOp { Op = "taper", Target = "name:TowerMass", StartRadius = 14.0, EndRadius = 9.0 },
+                    new RhinoActionOp { Op = "add_cylinder", Origin = new[] { 0.0, -14.0, 0.0 }, Radius = 5.0, Height = 12.0, Name = "AtriumCutter" },
+                    new RhinoActionOp { Op = "boolean_difference", Target = "name:TowerMass", SubtractTarget = "name:AtriumCutter", Name = "CarvedTower" },
+                    new RhinoActionOp { Op = "fillet_edges", Target = "name:CarvedTower", Radius = 0.25 },
+                    new RhinoActionOp { Op = "contour_slice", Target = "name:CarvedTower", Distance = 4.0, ExtrudeThickness = 0.3, Layer = "Floors" },
+                    new RhinoActionOp { Op = "add_helix", Origin = new[] { 0.0, 0.0, 0.0 }, Radius = 14.2, Radius2 = 9.2, Height = 60.0, Turns = 2.5, Name = "HelixRail" },
+                    new RhinoActionOp { Op = "pipe", Target = "name:HelixRail", Radius = 0.35, Radius2 = 0.2, CapMode = "round", Layer = "Diagrid" },
+                    new RhinoActionOp { Op = "mirror", Target = "last_created", Normal = new[] { 1.0, 0.0, 0.0 }, Copy = true },
+                    new RhinoActionOp { Op = "add_arc", Center = new[] { 0.0, 0.0, 60.0 }, Radius = 9.0, AngleDegrees = 90.0, Normal = new[] { 0.0, 1.0, 0.0 }, Name = "DomeProfile" },
+                    new RhinoActionOp { Op = "revolve", Target = "name:DomeProfile", Origin = new[] { 0.0, 0.0, 60.0 }, Axis = new[] { 0.0, 0.0, 1.0 }, AngleDegrees = 360.0, Capped = false, Name = "DomeSrf" },
+                    new RhinoActionOp { Op = "offset_surface", Target = "name:DomeSrf", Distance = 0.25, Solid = true },
+                    new RhinoActionOp { Op = "add_torus", Center = new[] { 0.0, 0.0, 60.0 }, Radius = 9.2, TubeRadius = 0.4 },
+                    new RhinoActionOp { Op = "add_ellipse", Center = new[] { 30.0, 0.0, 0.0 }, RadiusX = 12.0, RadiusY = 7.0, Name = "PlazaOuter" },
+                    new RhinoActionOp { Op = "add_circle", Center = new[] { 30.0, 0.0, 0.0 }, Radius = 3.0, Name = "PlazaPond" },
+                    new RhinoActionOp { Op = "planar_srf", Target = "name:PlazaOuter|PlazaPond", Layer = "Landscape" },
+                    new RhinoActionOp { Op = "zoom", Scope = "extents" }
+                }
+            };
+
+            RhinoActionValidationResult validation = RhinoActionPlanValidator.Validate(plan);
+            Assert.True(validation.IsValid, string.Join("; ", validation.Errors));
         }
 
         private sealed class StubHttpHandler : HttpMessageHandler

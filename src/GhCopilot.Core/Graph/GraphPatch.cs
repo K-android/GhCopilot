@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -17,6 +19,227 @@ namespace GhCopilot.Core.Graph
 
         [JsonPropertyName("explanation")]
         public string Explanation { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Cleans common structured-output LLM artifacts in GraphPatch JSON (explicit null optional fields,
+        /// blank nicknames, empty add_node settings objects, and out-of-default-bounds slider ranges)
+        /// prior to strict schema deserialization.
+        /// </summary>
+        public static string SanitizeLlmPatchJson(string? rawJson)
+        {
+            if (string.IsNullOrWhiteSpace(rawJson))
+            {
+                return rawJson ?? string.Empty;
+            }
+
+            string trimmed = rawJson!.Trim();
+            if (trimmed.StartsWith("```", StringComparison.Ordinal))
+            {
+                int firstNewline = trimmed.IndexOf('\n');
+                int lastFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+                if (firstNewline > 0 && lastFence > firstNewline)
+                {
+                    trimmed = trimmed.Substring(firstNewline + 1, lastFence - firstNewline - 1).Trim();
+                }
+            }
+
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(trimmed);
+                JsonElement root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object ||
+                    !root.TryGetProperty("ops", out JsonElement opsEl) ||
+                    opsEl.ValueKind != JsonValueKind.Array)
+                {
+                    return trimmed;
+                }
+
+                using var ms = new MemoryStream();
+                using (var writer = new Utf8JsonWriter(ms))
+                {
+                    writer.WriteStartObject();
+                    writer.WritePropertyName("ops");
+                    writer.WriteStartArray();
+                    foreach (JsonElement opEl in opsEl.EnumerateArray())
+                    {
+                        if (opEl.ValueKind != JsonValueKind.Object)
+                        {
+                            opEl.WriteTo(writer);
+                            continue;
+                        }
+
+                        WriteSanitizedOp(writer, opEl);
+                    }
+                    writer.WriteEndArray();
+
+                    string explanation = root.TryGetProperty("explanation", out JsonElement expEl) && expEl.ValueKind == JsonValueKind.String
+                        ? expEl.GetString() ?? string.Empty
+                        : string.Empty;
+                    writer.WriteString("explanation", explanation);
+                    writer.WriteEndObject();
+                }
+
+                return Encoding.UTF8.GetString(ms.ToArray());
+            }
+            catch (JsonException)
+            {
+                return trimmed;
+            }
+        }
+
+        private static void WriteSanitizedOp(Utf8JsonWriter writer, JsonElement opEl)
+        {
+            string opName = opEl.TryGetProperty("op", out JsonElement opVal) && opVal.ValueKind == JsonValueKind.String
+                ? opVal.GetString() ?? string.Empty
+                : string.Empty;
+            bool isAddNode = string.Equals(opName, "add_node", StringComparison.Ordinal);
+
+            writer.WriteStartObject();
+            foreach (JsonProperty prop in opEl.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Null)
+                {
+                    continue;
+                }
+
+                if (string.Equals(prop.Name, "node", StringComparison.Ordinal) && prop.Value.ValueKind == JsonValueKind.Object)
+                {
+                    if (!isAddNode) continue;
+                    writer.WritePropertyName("node");
+                    WriteSanitizedNode(writer, prop.Value);
+                    continue;
+                }
+
+                if (string.Equals(prop.Name, "settings", StringComparison.Ordinal) && prop.Value.ValueKind == JsonValueKind.Object)
+                {
+                    if (isAddNode) continue;
+                    WriteSanitizedSettingsProperty(writer, "settings", prop.Value, autoExpandSliderRange: false, omitIfEmpty: false);
+                    continue;
+                }
+
+                if (string.Equals(prop.Name, "wire", StringComparison.Ordinal) && prop.Value.ValueKind == JsonValueKind.Object)
+                {
+                    if (isAddNode) continue;
+                    writer.WritePropertyName("wire");
+                    writer.WriteStartObject();
+                    foreach (JsonProperty wp in prop.Value.EnumerateObject())
+                    {
+                        if (wp.Value.ValueKind != JsonValueKind.Null)
+                        {
+                            wp.WriteTo(writer);
+                        }
+                    }
+                    writer.WriteEndObject();
+                    continue;
+                }
+
+                if (isAddNode && string.Equals(prop.Name, "nodeId", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                prop.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+        }
+
+        private static void WriteSanitizedNode(Utf8JsonWriter writer, JsonElement nodeEl)
+        {
+            writer.WriteStartObject();
+            foreach (JsonProperty prop in nodeEl.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Null)
+                {
+                    continue;
+                }
+
+                if (string.Equals(prop.Name, "settings", StringComparison.Ordinal) && prop.Value.ValueKind == JsonValueKind.Object)
+                {
+                    WriteSanitizedSettingsProperty(writer, "settings", prop.Value, autoExpandSliderRange: true, omitIfEmpty: true);
+                    continue;
+                }
+
+                prop.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+        }
+
+        private static void WriteSanitizedSettingsProperty(
+            Utf8JsonWriter writer,
+            string propName,
+            JsonElement settingsEl,
+            bool autoExpandSliderRange,
+            bool omitIfEmpty)
+        {
+            var kept = new List<JsonProperty>();
+            double? min = null;
+            double? max = null;
+            double? val = null;
+
+            foreach (JsonProperty sp in settingsEl.EnumerateObject())
+            {
+                if (sp.Value.ValueKind == JsonValueKind.Null)
+                {
+                    continue;
+                }
+
+                if (string.Equals(sp.Name, "nickname", StringComparison.Ordinal) &&
+                    sp.Value.ValueKind == JsonValueKind.String &&
+                    string.IsNullOrWhiteSpace(sp.Value.GetString()))
+                {
+                    continue;
+                }
+
+                if (sp.Value.ValueKind == JsonValueKind.Number && sp.Value.TryGetDouble(out double num))
+                {
+                    if (string.Equals(sp.Name, "min", StringComparison.Ordinal)) min = num;
+                    else if (string.Equals(sp.Name, "max", StringComparison.Ordinal)) max = num;
+                    else if (string.Equals(sp.Name, "value", StringComparison.Ordinal)) val = num;
+                }
+
+                kept.Add(sp);
+            }
+
+            if (kept.Count == 0 && omitIfEmpty)
+            {
+                return;
+            }
+
+            writer.WritePropertyName(propName);
+            writer.WriteStartObject();
+            foreach (JsonProperty sp in kept)
+            {
+                sp.WriteTo(writer);
+            }
+
+            if (autoExpandSliderRange)
+            {
+                double effectiveMin = min ?? 0.0;
+                if (val.HasValue && !min.HasValue && val.Value < 0.0)
+                {
+                    effectiveMin = Math.Min(val.Value * 2.0, val.Value - 10.0);
+                    writer.WriteNumber("min", effectiveMin);
+                    min = effectiveMin;
+                }
+                else if (max.HasValue && !min.HasValue && max.Value <= 0.0)
+                {
+                    effectiveMin = max.Value - 100.0;
+                    writer.WriteNumber("min", effectiveMin);
+                    min = effectiveMin;
+                }
+
+                if (val.HasValue && !max.HasValue && val.Value > 100.0)
+                {
+                    writer.WriteNumber("max", Math.Max(val.Value * 2.0, val.Value + 10.0));
+                }
+                else if (min.HasValue && !max.HasValue && min.Value >= 100.0)
+                {
+                    writer.WriteNumber("max", min.Value + 100.0);
+                }
+            }
+
+            writer.WriteEndObject();
+        }
     }
 
     /// <summary>
@@ -164,7 +387,17 @@ namespace GhCopilot.Core.Graph
                     return Fail(result, "Snapshot contains null, duplicate or invalid node metadata.");
                 nodes.Add(node.Id, new StateNode
                 {
-                    Record = new ComponentRecord { Name = node.Name, Inputs = node.Inputs, Outputs = node.Outputs },
+                    Record = new ComponentRecord
+                    {
+                        Name = node.Name,
+                        Category = node.Category,
+                        IsStandaloneParam = node.Inputs.Count <= 1 && node.Outputs.Count <= 1 &&
+                            (string.Equals(node.Name, "Panel", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(node.Name, "Number Slider", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(node.Category, "Params", StringComparison.OrdinalIgnoreCase)),
+                        Inputs = node.Inputs,
+                        Outputs = node.Outputs
+                    },
                     Settings = Merge(null, node.Settings)
                 });
             }
@@ -244,8 +477,10 @@ namespace GhCopilot.Core.Graph
                         return "Wire endpoints and port names must not be null; node IDs must be valid.";
                     if (!nodes.TryGetValue(wire.FromNode, out StateNode? source) ||
                         !nodes.TryGetValue(wire.ToNode, out StateNode? target)) return "Wire references an unknown node.";
-                    int from = ResolvePort(source.Record.Outputs, wire.FromParam);
-                    int to = ResolvePort(target.Record.Inputs, wire.ToParam);
+                    bool sourceStandalone = source.Record.IsStandaloneParam || string.Equals(source.Record.Name, "Panel", StringComparison.OrdinalIgnoreCase);
+                    bool targetStandalone = target.Record.IsStandaloneParam || string.Equals(target.Record.Name, "Panel", StringComparison.OrdinalIgnoreCase);
+                    int from = ResolvePort(source.Record.Outputs, wire.FromParam, sourceStandalone);
+                    int to = ResolvePort(target.Record.Inputs, wire.ToParam, targetStandalone);
                     if (from < 0 || to < 0) return "Wire output/input parameter does not exist (or has the wrong direction).";
                     if (wire.TargetMapping != null && wire.TargetMapping != "none" &&
                         wire.TargetMapping != "flatten" && wire.TargetMapping != "graft") return "Invalid targetMapping.";
@@ -369,7 +604,7 @@ namespace GhCopilot.Core.Graph
 
         // Same selectors as GraphValidator: name, nickname, zero-based index, Name[occurrence],
         // and the empty selector for a single port. TryParse prevents model integer overflow.
-        private static int ResolvePort(IReadOnlyList<ParamRecord> ports, string spec)
+        private static int ResolvePort(IReadOnlyList<ParamRecord> ports, string spec, bool allowTypeName = false)
         {
             spec = spec.Trim();
             if (spec.Length == 0) return ports.Count == 1 ? 0 : -1;
@@ -383,6 +618,8 @@ namespace GhCopilot.Core.Graph
             }
             for (int i = 0; i < ports.Count; i++)
                 if (Matches(ports[i], spec)) return i;
+            if (allowTypeName && ports.Count == 1 && string.Equals(ports[0].TypeName, spec, StringComparison.OrdinalIgnoreCase))
+                return 0;
             return int.TryParse(spec, out int index) && index >= 0 && index < ports.Count ? index : -1;
         }
 
@@ -392,8 +629,10 @@ namespace GhCopilot.Core.Graph
 
         private static StateWire Connection(string from, string output, string to, string input, Dictionary<string, StateNode> nodes)
         {
-            int source = ResolvePort(nodes[from].Record.Outputs, output);
-            int target = ResolvePort(nodes[to].Record.Inputs, input);
+            bool sourceStandalone = nodes[from].Record.IsStandaloneParam || string.Equals(nodes[from].Record.Name, "Panel", StringComparison.OrdinalIgnoreCase);
+            bool targetStandalone = nodes[to].Record.IsStandaloneParam || string.Equals(nodes[to].Record.Name, "Panel", StringComparison.OrdinalIgnoreCase);
+            int source = ResolvePort(nodes[from].Record.Outputs, output, sourceStandalone);
+            int target = ResolvePort(nodes[to].Record.Inputs, input, targetStandalone);
             return new StateWire { From = from, To = to,
                 Output = source >= 0 ? "index:" + source : "raw:" + output,
                 Input = target >= 0 ? "index:" + target : "raw:" + input };
@@ -425,11 +664,32 @@ namespace GhCopilot.Core.Graph
     /// </summary>
     public static class GraphPatchSchema
     {
-        public static JsonElement Build()
+        public static JsonElement Build() => Build(null);
+
+        public static JsonElement Build(IEnumerable<ComponentRecord>? shortlist)
         {
             object text = new { type = "string" };
             object number = new { type = "number" };
             object strings = new { type = "array", items = text };
+
+            List<string>? shortlistIds = null;
+            if (shortlist != null)
+            {
+                shortlistIds = new List<string>();
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (ComponentRecord record in shortlist)
+                {
+                    if (record != null && !string.IsNullOrWhiteSpace(record.ShortId) && seen.Add(record.ShortId))
+                    {
+                        shortlistIds.Add(record.ShortId);
+                    }
+                }
+            }
+
+            object refSchema = shortlistIds != null && shortlistIds.Count > 0
+                ? (object)new { type = "string", @enum = shortlistIds }
+                : text;
+
             var settings = new
             {
                 type = "object",
@@ -458,7 +718,7 @@ namespace GhCopilot.Core.Graph
                                 op = new { type = "string", @enum = new[] { "add_node", "delete_node", "set_param", "wire", "unwire" } },
                                 nodeId = text,
                                 node = new { type = "object", additionalProperties = false,
-                                    properties = new { id = text, @ref = text, x = number, y = number, settings },
+                                    properties = new { id = text, @ref = refSchema, x = number, y = number, settings },
                                     required = new[] { "id", "ref", "x", "y" } },
                                 settings,
                                 wire = new { type = "object", additionalProperties = false,

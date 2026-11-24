@@ -82,7 +82,14 @@ namespace GhCopilot.Core.Index
             ["tween"] = new[] { "pufferfish", "tween", "morph", "curve", "surface", "plane" },
             ["morph"] = new[] { "pufferfish", "morph", "tween", "box", "surface" },
             ["bake"] = new[] { "bake", "attributes", "layer", "elefront", "human", "object" },
-            ["attributes"] = new[] { "attributes", "layer", "elefront", "human", "object" }
+            ["attributes"] = new[] { "attributes", "layer", "elefront", "human", "object" },
+            ["slider"] = new[] { "number", "slider", "params", "input" },
+            ["sliders"] = new[] { "number", "slider", "params", "input" },
+            ["toggle"] = new[] { "boolean", "toggle", "params", "input" },
+            ["input"] = new[] { "number", "slider", "panel", "boolean", "toggle", "geometry", "curve", "brep", "surface", "point", "params" },
+            ["inputs"] = new[] { "number", "slider", "panel", "boolean", "toggle", "geometry", "curve", "brep", "surface", "point", "params" },
+            ["selection"] = new[] { "geometry", "curve", "brep", "surface", "mesh", "point", "params", "model", "object" },
+            ["selected"] = new[] { "geometry", "curve", "brep", "surface", "mesh", "point", "params", "model", "object" }
         };
 
         private static readonly string[] CoreRevitPrimitiveNames =
@@ -102,6 +109,28 @@ namespace GhCopilot.Core.Index
             "Graphical Element"
         };
 
+        private static readonly string[] EssentialUserInputNames =
+        {
+            "Number Slider",
+            "Panel",
+            "Boolean Toggle",
+            "Value List",
+            "Button"
+        };
+
+        private static readonly string[] EssentialSelectionParamNames =
+        {
+            "Geometry",
+            "Curve",
+            "Brep",
+            "Surface",
+            "Mesh",
+            "Point",
+            "Vector",
+            "Plane",
+            "Box"
+        };
+
         private static readonly string[] CorePrimitiveNames =
         {
             "Number Slider",
@@ -113,10 +142,18 @@ namespace GhCopilot.Core.Index
             "Series",
             "Range",
             "Construct Point",
+            "Vector XYZ",
+            "Unit Z",
             "Circle",
+            "Rectangle",
             "Line",
             "Move",
+            "Rotate",
+            "Scale",
             "Extrude",
+            "Loft",
+            "Boundary Surfaces",
+            "Cap Holes",
             "List Item",
             "Merge"
         };
@@ -124,7 +161,7 @@ namespace GhCopilot.Core.Index
         public static IReadOnlyList<ComponentRecord> Retrieve(
             IReadOnlyList<ComponentRecord> corpus,
             string query,
-            int maxResults = 60)
+            int maxResults = 90)
         {
             if (corpus is null)
             {
@@ -136,7 +173,7 @@ namespace GhCopilot.Core.Index
                 return Array.Empty<ComponentRecord>();
             }
 
-            int limit = maxResults < 1 ? 1 : (maxResults > 80 ? 80 : maxResults);
+            int limit = maxResults < 1 ? 1 : (maxResults > 140 ? 140 : maxResults);
             List<string> queryTokens = Tokenize(query);
 
             if (queryTokens.Count == 0)
@@ -228,11 +265,61 @@ namespace GhCopilot.Core.Index
             var selected = new List<ComponentRecord>(limit);
             var selectedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach ((ComponentRecord record, double score) in scored
+            List<(ComponentRecord Record, double Score)> positiveScored = scored
                 .Where(x => x.Score > 0.0)
                 .OrderByDescending(x => x.Score)
                 .ThenByDescending(x => x.Record.IsCompany)
-                .ThenBy(x => x.Record.ShortId, StringComparer.Ordinal))
+                .ThenBy(x => x.Record.ShortId, StringComparer.Ordinal)
+                .ToList();
+
+            List<ComponentRecord> guaranteedFoundation = limit >= 25
+                ? CollectEssentialFoundation(corpus, Math.Min(24, limit / 3))
+                : new List<ComponentRecord>();
+
+            var reservedIds = new HashSet<string>(
+                guaranteedFoundation.Select(c => c.ShortId),
+                StringComparer.OrdinalIgnoreCase);
+
+            int nonReservedAdded = 0;
+            int maxNonReservedBeforeGuarantee = Math.Max(1, limit - guaranteedFoundation.Count);
+
+            foreach ((ComponentRecord record, double _) in positiveScored)
+            {
+                if (selected.Count >= limit)
+                {
+                    break;
+                }
+
+                bool isReserved = reservedIds.Contains(record.ShortId);
+                if (!isReserved && nonReservedAdded >= maxNonReservedBeforeGuarantee)
+                {
+                    continue;
+                }
+
+                if (selectedIds.Add(record.ShortId))
+                {
+                    selected.Add(record);
+                    if (!isReserved)
+                    {
+                        nonReservedAdded++;
+                    }
+                }
+            }
+
+            foreach (ComponentRecord essential in guaranteedFoundation)
+            {
+                if (selected.Count >= limit)
+                {
+                    break;
+                }
+
+                if (selectedIds.Add(essential.ShortId))
+                {
+                    selected.Add(essential);
+                }
+            }
+
+            foreach ((ComponentRecord record, double _) in positiveScored)
             {
                 if (selected.Count >= limit)
                 {
@@ -392,6 +479,62 @@ namespace GhCopilot.Core.Index
             }
 
             return false;
+        }
+
+        private static List<ComponentRecord> CollectEssentialFoundation(
+            IReadOnlyList<ComponentRecord> corpus,
+            int maxFoundation)
+        {
+            var foundation = new List<ComponentRecord>(maxFoundation);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void TryAddByName(string targetName, bool preferStandaloneParam)
+            {
+                if (foundation.Count >= maxFoundation) return;
+
+                ComponentRecord? best = null;
+                foreach (ComponentRecord item in corpus)
+                {
+                    if (item == null || !string.Equals(item.Name, targetName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (preferStandaloneParam &&
+                        (item.IsStandaloneParam || string.Equals(item.Category, "Params", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        best = item;
+                        break;
+                    }
+
+                    if (best == null)
+                    {
+                        best = item;
+                    }
+                }
+
+                if (best != null && !string.IsNullOrWhiteSpace(best.ShortId) && seen.Add(best.ShortId))
+                {
+                    foundation.Add(best);
+                }
+            }
+
+            foreach (string inputName in EssentialUserInputNames)
+            {
+                TryAddByName(inputName, preferStandaloneParam: true);
+            }
+
+            foreach (string paramName in EssentialSelectionParamNames)
+            {
+                TryAddByName(paramName, preferStandaloneParam: true);
+            }
+
+            foreach (string coreName in CorePrimitiveNames)
+            {
+                TryAddByName(coreName, preferStandaloneParam: false);
+            }
+
+            return foundation;
         }
 
         private static bool IsCorePrimitive(ComponentRecord record)

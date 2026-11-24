@@ -51,9 +51,11 @@ namespace GhCopilot.Gh.Host
             if (!await _chatGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
                 return FailureResponse("A chat request is already running.");
             ChatTurnTransaction? transaction = null;
+            bool promptRequestsSelection = ChatPromptBuilder.RequestsRhinoSelectionInPrompt(prompt);
+            bool effectiveUseRhinoSelection = useRhinoSelection || promptRequestsSelection;
             int tokens = 0;
             string user = action == ChatAction.Message ? prompt.Trim() : action + ": " + prompt.Trim();
-            if (useRhinoSelection) user += "\nExplicit permission: use my currently selected Rhino objects as inputs for this turn.";
+            if (effectiveUseRhinoSelection) user += "\nExplicit permission: place appropriate geometry/selection input parameters and bind my currently selected Rhino objects if any are selected.";
             try
             {
                 if (HasActivePreview && !AcceptActivePreview())
@@ -76,7 +78,7 @@ namespace GhCopilot.Gh.Host
                                             ChatPromptBuilder.IsApprovalOrBuildConfirmation(prompt);
                 bool isConversationalFastPath = !approvingPendingPlan &&
                                                 action == ChatAction.Message &&
-                                                !useRhinoSelection &&
+                                                !effectiveUseRhinoSelection &&
                                                 ChatPromptBuilder.IsConversationalOnlyPrompt(prompt);
 
                 if (isConversationalFastPath)
@@ -113,7 +115,7 @@ namespace GhCopilot.Gh.Host
                 }
 
                 if (action == ChatAction.Message &&
-                    !useRhinoSelection &&
+                    !effectiveUseRhinoSelection &&
                     ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, Session, settings.PlanFirstMode))
                 {
                     ReportStage("📋 Inspecting canvas, installed plugins & Rhino viewport to draft plan...");
@@ -122,7 +124,7 @@ namespace GhCopilot.Gh.Host
                     IndexStore planStore = EnsureIndexLoaded();
                     string planQuery = ChatPromptBuilder.BuildRetrievalQuery(Session, user);
                     IReadOnlyList<ComponentRecord> planShortlist = BuildShortlistForFix(planStore, readOnlySnapshot, planQuery)
-                        .Take(35)
+                        .Take(50)
                         .ToList();
                     ParamHydrator.HydrateShortlist(planShortlist);
                     IReadOnlyList<string> installedPlugins = planStore.GetInstalledPluginNames();
@@ -221,8 +223,14 @@ namespace GhCopilot.Gh.Host
                 string system = action == ChatAction.ExplainSelection
                     ? PromptBuilder.BuildExplainSystemInstruction()
                     : ChatPromptBuilder.BuildSystem(shortlist, patchOnly);
-                system += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
-                JsonElement schema = patchOnly ? GraphPatchSchema.Build() : SchemaBuilder.BuildResponseJsonSchema(shortlist);
+                if (!effectiveUseRhinoSelection)
+                {
+                    system += "\nNever silently read Rhino selection. Empty required inputs need user data, sliders/panels, or explicit selection consent.";
+                }
+                bool allowPythonInitially = ChatPromptBuilder.ExplicitlyRequestsPythonScript(effectiveUser);
+                JsonElement schema = patchOnly
+                    ? GraphPatchSchema.Build(shortlist)
+                    : SchemaBuilder.BuildResponseJsonSchema(shortlist, includeScript: allowPythonInitially);
                 string basePayload = ChatPromptBuilder.Build(Session, snapshot, null, effectiveUser, shortlist, matchingRecipes, viewportSnapshot);
 
                 if (action == ChatAction.ExplainSelection)
@@ -250,8 +258,8 @@ namespace GhCopilot.Gh.Host
 
                 (bool validOutput, GraphPatch? patch, GraphSpec? graph, string explanation, List<string> validationErrors, int initialTokens) =
                     await GenerateAndValidateChatTurnAsync(
-                        apiKey, settings, endpoint, system, basePayload, schema, patchOnly, action, useRhinoSelection,
-                        snapshot, shortlist, viewportSnapshot.ViewportImageBase64Png, cancellationToken).ConfigureAwait(false);
+                        apiKey, settings, endpoint, system, basePayload, schema, patchOnly, action, effectiveUseRhinoSelection,
+                        allowPythonInitially, snapshot, shortlist, viewportSnapshot.ViewportImageBase64Png, cancellationToken).ConfigureAwait(false);
                 tokens += initialTokens;
 
                 if (!validOutput)
@@ -260,8 +268,8 @@ namespace GhCopilot.Gh.Host
                 }
 
                 bool hasCanvasEdits = patchOnly
-                    ? (patch!.Ops.Count > 0 || useRhinoSelection)
-                    : (graph!.Nodes.Count > 0 || graph.Script != null || useRhinoSelection);
+                    ? (patch!.Ops.Count > 0 || effectiveUseRhinoSelection)
+                    : (graph!.Nodes.Count > 0 || graph.Script != null || effectiveUseRhinoSelection);
 
                 if (!hasCanvasEdits)
                 {
@@ -289,14 +297,21 @@ namespace GhCopilot.Gh.Host
                     else transaction.Apply(patch!, snapshot, id => ResolveChatProxy(store, id));
                     scope.AddRange(transaction.AddedNodeIds);
                     scope = scope.Distinct().Where(id => doc.FindObject(id, false) != null).ToList();
-                    if (useRhinoSelection)
+                    if (effectiveUseRhinoSelection)
                     {
-                        var bindingErrors = new List<string>();
-                        transaction.MutateInputs(scope, () => bindingErrors.AddRange(ChatInputInspector.BindRhinoSelection(doc, scope)));
-                        doc.NewSolution(false);
-                        ChatInputState bound = ChatInputInspector.Inspect(doc, scope);
-                        bound.InvalidInputs.AddRange(bindingErrors);
-                        return bound;
+                        bool hasSelectedRhinoObjects = RhinoDoc.ActiveDoc?.Objects?.GetSelectedObjects(false, false)?.Any() == true;
+                        if (useRhinoSelection || hasSelectedRhinoObjects)
+                        {
+                            var bindingErrors = new List<string>();
+                            transaction.MutateInputs(scope, () => bindingErrors.AddRange(ChatInputInspector.BindRhinoSelection(doc, scope)));
+                            doc.NewSolution(false);
+                            ChatInputState bound = ChatInputInspector.Inspect(doc, scope);
+                            if (useRhinoSelection)
+                            {
+                                bound.InvalidInputs.AddRange(bindingErrors);
+                            }
+                            return bound;
+                        }
                     }
                     return ChatInputInspector.Inspect(doc, scope);
                 }).ConfigureAwait(false);
@@ -314,9 +329,12 @@ namespace GhCopilot.Gh.Host
                     }).ConfigureAwait(false);
                     string repairUser = "Fix only the runtime errors from this turn using patch ops; all required inputs have been checked. Original request: " + effectiveUser;
                     string repairSystem = ChatPromptBuilder.BuildSystem(shortlist, true);
-                    repairSystem += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
+                    if (!effectiveUseRhinoSelection)
+                    {
+                        repairSystem += "\nNever silently read Rhino selection. Empty required inputs need user data or explicit selection consent; do not invent replacement geometry to hide missing inputs.";
+                    }
                     string repairPayload = ChatPromptBuilder.Build(Session, repairSnapshot, state.RuntimeMessages, repairUser, shortlist);
-                    JsonElement repairSchema = GraphPatchSchema.Build();
+                    JsonElement repairSchema = GraphPatchSchema.Build(shortlist);
                     tokens += EstimateSend(repairSystem, repairPayload, repairSchema.GetRawText());
                     PayloadAuditLogger.LogSentPayload("ChatRuntimeRepairScopedSnapshot", $"{settings.Provider}:{settings.ModelId}", settings.SendCanvasData, repairSystem, repairPayload);
                     repairs++;
@@ -325,7 +343,8 @@ namespace GhCopilot.Gh.Host
                     {
                         string fixRaw = await _geminiClient.GenerateGraphJsonAsync(apiKey, settings.ModelId, repairSystem, repairPayload, repairSchema,
                             TimeSpan.FromSeconds(settings.RequestTimeoutSeconds), cancellationToken, settings.Provider, endpoint).ConfigureAwait(false);
-                        fix = JsonSerializer.Deserialize<GraphPatch>(fixRaw) ?? throw new JsonException("Empty repair patch.");
+                        string sanitizedFix = GraphPatch.SanitizeLlmPatchJson(fixRaw);
+                        fix = JsonSerializer.Deserialize<GraphPatch>(sanitizedFix) ?? throw new JsonException("Empty repair patch.");
                     }
                     catch (Exception ex) when (ex is JsonException || ex is GeminiApiException)
                     { repairNotes.Add("Auto-repair stopped: " + ex.Message); break; }
@@ -400,12 +419,14 @@ namespace GhCopilot.Gh.Host
                 bool patchOnly,
                 ChatAction action,
                 bool useRhinoSelection,
+                bool allowPythonInitially,
                 CanvasSnapshot snapshot,
                 IReadOnlyList<ComponentRecord> shortlist,
                 string? viewportImageBase64Png,
                 CancellationToken cancellationToken)
         {
-            string schemaRaw = schema.GetRawText();
+            JsonElement activeSchema = schema;
+            string schemaRaw = activeSchema.GetRawText();
             string currentPayload = basePayload;
             string lastRaw = string.Empty;
             var lastErrors = new List<string>();
@@ -416,6 +437,12 @@ namespace GhCopilot.Gh.Host
 
             for (int attempt = 0; attempt <= RepairLoop.MaxValidatorRetries; attempt++)
             {
+                if (!patchOnly && !allowPythonInitially && attempt == RepairLoop.MaxValidatorRetries)
+                {
+                    activeSchema = SchemaBuilder.BuildResponseJsonSchema(shortlist, includeScript: true);
+                    schemaRaw = activeSchema.GetRawText();
+                }
+
                 if (attempt > 0)
                 {
                     ReportStage($"🔄 Self-correcting validation/schema issue (attempt {attempt + 1}/{RepairLoop.MaxValidatorRetries + 1})...");
@@ -439,7 +466,7 @@ namespace GhCopilot.Gh.Host
                     settings.ModelId,
                     system,
                     currentPayload,
-                    schema,
+                    activeSchema,
                     TimeSpan.FromSeconds(settings.RequestTimeoutSeconds),
                     cancellationToken,
                     settings.Provider,
@@ -452,7 +479,8 @@ namespace GhCopilot.Gh.Host
                 {
                     try
                     {
-                        GraphPatch patch = JsonSerializer.Deserialize<GraphPatch>(lastRaw) ?? throw new JsonException("Empty patch.");
+                        string sanitizedRaw = GraphPatch.SanitizeLlmPatchJson(lastRaw);
+                        GraphPatch patch = JsonSerializer.Deserialize<GraphPatch>(sanitizedRaw) ?? throw new JsonException("Empty patch.");
                         PatchValidationResult validation = GraphPatchValidator.Validate(patch, snapshot, shortlist);
                         if (validation.IsValid)
                         {

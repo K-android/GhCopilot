@@ -31,6 +31,12 @@ namespace GhCopilot.Core.Rhino
         [JsonPropertyName("target")]
         public string? Target { get; set; }
 
+        [JsonPropertyName("railTarget")]
+        public string? RailTarget { get; set; }
+
+        [JsonPropertyName("subtractTarget")]
+        public string? SubtractTarget { get; set; }
+
         [JsonPropertyName("layer")]
         public string? Layer { get; set; }
 
@@ -39,6 +45,9 @@ namespace GhCopilot.Core.Rhino
 
         [JsonPropertyName("loftType")]
         public string? LoftType { get; set; }
+
+        [JsonPropertyName("capMode")]
+        public string? CapMode { get; set; }
 
         [JsonPropertyName("displayMode")]
         public string? DisplayMode { get; set; }
@@ -100,20 +109,50 @@ namespace GhCopilot.Core.Rhino
         [JsonPropertyName("radius")]
         public double? Radius { get; set; }
 
+        [JsonPropertyName("radius2")]
+        public double? Radius2 { get; set; }
+
+        [JsonPropertyName("tubeRadius")]
+        public double? TubeRadius { get; set; }
+
+        [JsonPropertyName("radiusX")]
+        public double? RadiusX { get; set; }
+
+        [JsonPropertyName("radiusY")]
+        public double? RadiusY { get; set; }
+
+        [JsonPropertyName("startRadius")]
+        public double? StartRadius { get; set; }
+
+        [JsonPropertyName("endRadius")]
+        public double? EndRadius { get; set; }
+
         [JsonPropertyName("distance")]
         public double? Distance { get; set; }
+
+        [JsonPropertyName("extrudeThickness")]
+        public double? ExtrudeThickness { get; set; }
 
         [JsonPropertyName("angleDegrees")]
         public double? AngleDegrees { get; set; }
 
+        [JsonPropertyName("startAngleDegrees")]
+        public double? StartAngleDegrees { get; set; }
+
         [JsonPropertyName("totalAngleDegrees")]
         public double? TotalAngleDegrees { get; set; }
+
+        [JsonPropertyName("turns")]
+        public double? Turns { get; set; }
 
         [JsonPropertyName("factor")]
         public double? Factor { get; set; }
 
         [JsonPropertyName("count")]
         public int? Count { get; set; }
+
+        [JsonPropertyName("sides")]
+        public int? Sides { get; set; }
 
         [JsonPropertyName("closed")]
         public bool? Closed { get; set; }
@@ -126,6 +165,24 @@ namespace GhCopilot.Core.Rhino
 
         [JsonPropertyName("capped")]
         public bool? Capped { get; set; }
+
+        [JsonPropertyName("inscribed")]
+        public bool? Inscribed { get; set; }
+
+        [JsonPropertyName("solid")]
+        public bool? Solid { get; set; }
+
+        [JsonPropertyName("chamfer")]
+        public bool? Chamfer { get; set; }
+
+        [JsonPropertyName("flat")]
+        public bool? Flat { get; set; }
+
+        [JsonPropertyName("copy")]
+        public bool? Copy { get; set; }
+
+        [JsonPropertyName("keepCutters")]
+        public bool? KeepCutters { get; set; }
 
         [JsonPropertyName("visible")]
         public bool? Visible { get; set; }
@@ -146,27 +203,46 @@ namespace GhCopilot.Core.Rhino
     /// </summary>
     public static class RhinoActionPlanValidator
     {
-        public const int MaxOpsPerTurn = 60;
-        public const int MaxArrayCount = 200;
+        public const int MaxOpsPerTurn = 250;
+        public const int MaxArrayCount = 500;
         public const int MaxPolylinePoints = 500;
 
         public static readonly IReadOnlyCollection<string> SupportedOpNames = new[]
         {
             "add_point",
             "add_line",
+            "add_arc",
             "add_circle",
+            "add_ellipse",
+            "add_polygon",
             "add_rectangle",
             "add_polyline",
+            "add_helix",
             "add_box",
             "add_sphere",
             "add_cylinder",
             "add_cone",
+            "add_torus",
             "extrude",
             "loft",
+            "revolve",
+            "sweep1",
+            "pipe",
+            "planar_srf",
+            "cap_planar_holes",
             "offset_curve",
+            "offset_surface",
+            "fillet_edges",
+            "boolean_union",
+            "boolean_difference",
+            "boolean_intersection",
+            "contour_slice",
             "move",
             "rotate",
             "scale",
+            "mirror",
+            "twist",
+            "taper",
             "copy",
             "array_linear",
             "array_polar",
@@ -194,6 +270,10 @@ namespace GhCopilot.Core.Rhino
 
         private static readonly HashSet<string> ValidLoftTypes = new HashSet<string>(
             new[] { "normal", "loose", "tight", "straight", "uniform" },
+            StringComparer.OrdinalIgnoreCase);
+
+        private static readonly HashSet<string> ValidCapModes = new HashSet<string>(
+            new[] { "flat", "round", "none" },
             StringComparer.OrdinalIgnoreCase);
 
         private static readonly HashSet<string> ValidZoomScopes = new HashSet<string>(
@@ -274,10 +354,17 @@ namespace GhCopilot.Core.Rhino
 
             ValidateColorIfPresent(op.Color, $"{prefix}.color", errors);
             ValidateTargetIfPresent(op.Target, $"{prefix}.target", errors);
+            ValidateTargetIfPresent(op.RailTarget, $"{prefix}.railTarget", errors);
+            ValidateTargetIfPresent(op.SubtractTarget, $"{prefix}.subtractTarget", errors);
 
             if (!string.IsNullOrWhiteSpace(op.LoftType) && !ValidLoftTypes.Contains(op.LoftType!.Trim()))
             {
                 errors.Add($"{prefix}.loftType: Unsupported loftType '{op.LoftType}'. Use normal, loose, tight, straight, or uniform.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(op.CapMode) && !ValidCapModes.Contains(op.CapMode!.Trim()))
+            {
+                errors.Add($"{prefix}.capMode: Unsupported capMode '{op.CapMode}'. Use flat, round, or none.");
             }
 
             if (!string.IsNullOrWhiteSpace(op.Scope) && !ValidZoomScopes.Contains(op.Scope!.Trim()))
@@ -288,6 +375,55 @@ namespace GhCopilot.Core.Rhino
             if (op.Radius.HasValue && !IsPositiveFinite(op.Radius.Value))
             {
                 errors.Add($"{prefix}.radius: Radius must be a positive finite number.");
+            }
+
+            if (op.Radius2.HasValue)
+            {
+                bool allowZero = normalizedOp == "add_helix";
+                if (allowZero ? (!IsFinite(op.Radius2.Value) || op.Radius2.Value < 0.0) : !IsPositiveFinite(op.Radius2.Value))
+                {
+                    errors.Add($"{prefix}.radius2: Radius2 must be finite and {(allowZero ? ">= 0" : "> 0")}.");
+                }
+            }
+
+            if (op.TubeRadius.HasValue && !IsPositiveFinite(op.TubeRadius.Value))
+            {
+                errors.Add($"{prefix}.tubeRadius: TubeRadius must be a positive finite number.");
+            }
+
+            if (op.RadiusX.HasValue && !IsPositiveFinite(op.RadiusX.Value))
+            {
+                errors.Add($"{prefix}.radiusX: RadiusX must be a positive finite number.");
+            }
+
+            if (op.RadiusY.HasValue && !IsPositiveFinite(op.RadiusY.Value))
+            {
+                errors.Add($"{prefix}.radiusY: RadiusY must be a positive finite number.");
+            }
+
+            if (op.StartRadius.HasValue && !IsPositiveFinite(op.StartRadius.Value))
+            {
+                errors.Add($"{prefix}.startRadius: StartRadius must be a positive finite number.");
+            }
+
+            if (op.EndRadius.HasValue && (!IsFinite(op.EndRadius.Value) || op.EndRadius.Value < 0.0))
+            {
+                errors.Add($"{prefix}.endRadius: EndRadius must be a non-negative finite number.");
+            }
+
+            if (op.ExtrudeThickness.HasValue && !IsPositiveFinite(op.ExtrudeThickness.Value))
+            {
+                errors.Add($"{prefix}.extrudeThickness: ExtrudeThickness must be a positive finite number.");
+            }
+
+            if (op.Turns.HasValue && !IsPositiveFinite(op.Turns.Value))
+            {
+                errors.Add($"{prefix}.turns: Turns must be a positive finite number.");
+            }
+
+            if (op.StartAngleDegrees.HasValue && !IsFinite(op.StartAngleDegrees.Value))
+            {
+                errors.Add($"{prefix}.startAngleDegrees: StartAngleDegrees must be finite.");
             }
 
             if (op.Width.HasValue && !IsPositiveFinite(op.Width.Value))
@@ -302,11 +438,11 @@ namespace GhCopilot.Core.Rhino
 
             if (op.Height.HasValue)
             {
-                if (normalizedOp == "extrude")
+                if (normalizedOp == "extrude" || normalizedOp == "add_helix")
                 {
                     if (!IsNonZeroFinite(op.Height.Value))
                     {
-                        errors.Add($"{prefix}.height: Extrude height must be a non-zero finite number.");
+                        errors.Add($"{prefix}.height: Height must be a non-zero finite number.");
                     }
                 }
                 else if (!IsPositiveFinite(op.Height.Value))
@@ -364,11 +500,99 @@ namespace GhCopilot.Core.Rhino
                     }
                     break;
 
+                case "add_arc":
+                {
+                    bool hasThreePoints = op.Start != null && op.Point != null && op.End != null;
+                    bool hasCenterRadiusSweep = op.Radius.HasValue && op.AngleDegrees.HasValue && IsNonZeroFinite(op.AngleDegrees.Value);
+                    if (!hasThreePoints && !hasCenterRadiusSweep)
+                    {
+                        errors.Add($"{prefix}: Provide either 3-point ('start', 'point', 'end') or ('radius' > 0 and non-zero 'angleDegrees').");
+                    }
+                    break;
+                }
+
                 case "add_circle":
                 case "add_sphere":
+                case "pipe":
+                case "fillet_edges":
                     if (!op.Radius.HasValue)
                     {
                         errors.Add($"{prefix}: 'radius' (> 0) is required.");
+                    }
+                    break;
+
+                case "add_ellipse":
+                    if ((!op.RadiusX.HasValue && !op.Width.HasValue) ||
+                        (!op.RadiusY.HasValue && !op.Depth.HasValue && !op.Height.HasValue))
+                    {
+                        errors.Add($"{prefix}: Positive 'radiusX' (or 'width') and 'radiusY' (or 'depth') are required.");
+                    }
+                    break;
+
+                case "add_polygon":
+                {
+                    int polySides = op.Sides ?? op.Count ?? 0;
+                    if (!op.Radius.HasValue || polySides < 3 || polySides > 128)
+                    {
+                        errors.Add($"{prefix}: Positive 'radius' and 'sides' (or 'count', 3..128) are required.");
+                    }
+                    break;
+                }
+
+                case "add_torus":
+                    if (!op.Radius.HasValue || !op.TubeRadius.HasValue)
+                    {
+                        errors.Add($"{prefix}: Positive 'radius' (major) and 'tubeRadius' (minor) are required.");
+                    }
+                    break;
+
+                case "add_helix":
+                    if (!op.Radius.HasValue || !op.Height.HasValue || !op.Turns.HasValue)
+                    {
+                        errors.Add($"{prefix}: Positive 'radius', non-zero 'height', and positive 'turns' are required.");
+                    }
+                    break;
+
+                case "revolve":
+                    if (op.AngleDegrees.HasValue && !IsNonZeroFinite(op.AngleDegrees.Value))
+                    {
+                        errors.Add($"{prefix}: 'angleDegrees' must be non-zero when specified.");
+                    }
+                    break;
+
+                case "offset_surface":
+                    if (!op.Distance.HasValue)
+                    {
+                        errors.Add($"{prefix}: Non-zero 'distance' (shell thickness) is required for offset_surface.");
+                    }
+                    break;
+
+                case "boolean_difference":
+                case "boolean_intersection":
+                    if (string.IsNullOrWhiteSpace(op.SubtractTarget))
+                    {
+                        errors.Add($"{prefix}: 'subtractTarget' selector (e.g. 'last_created', 'name:Cutter', 'layer:Cutters') is required.");
+                    }
+                    break;
+
+                case "twist":
+                    if (!op.AngleDegrees.HasValue || !IsNonZeroFinite(op.AngleDegrees.Value))
+                    {
+                        errors.Add($"{prefix}: Non-zero 'angleDegrees' is required for twist.");
+                    }
+                    break;
+
+                case "taper":
+                    if (!op.StartRadius.HasValue || !op.EndRadius.HasValue)
+                    {
+                        errors.Add($"{prefix}: Positive 'startRadius' and non-negative 'endRadius' are required for taper.");
+                    }
+                    break;
+
+                case "contour_slice":
+                    if (!op.Distance.HasValue || op.Distance.Value <= 0.0)
+                    {
+                        errors.Add($"{prefix}: Positive 'distance' (> 0) spacing between contour slices is required.");
                     }
                     break;
 
@@ -553,6 +777,7 @@ namespace GhCopilot.Core.Rhino
             string t = target!.Trim();
             if (string.Equals(t, "selected", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(t, "last_created", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(t, "turn_created", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(t, "all", StringComparison.OrdinalIgnoreCase))
             {
                 return;
@@ -569,9 +794,11 @@ namespace GhCopilot.Core.Rhino
 
             if (t.StartsWith("name:", StringComparison.OrdinalIgnoreCase))
             {
-                if (string.IsNullOrWhiteSpace(t.Substring("name:".Length)))
+                string rawNames = t.Substring("name:".Length);
+                if (string.IsNullOrWhiteSpace(rawNames) ||
+                    rawNames.Split(new[] { '|', ',' }, StringSplitOptions.RemoveEmptyEntries).All(string.IsNullOrWhiteSpace))
                 {
-                    errors.Add($"{fieldName}: 'name:' selector requires a non-empty object name.");
+                    errors.Add($"{fieldName}: 'name:' selector requires at least one non-empty object name.");
                 }
                 return;
             }
@@ -586,7 +813,7 @@ namespace GhCopilot.Core.Rhino
                 return;
             }
 
-            errors.Add($"{fieldName}: Invalid target '{target}'. Use 'selected', 'last_created', 'all', 'layer:<name>', 'name:<name>', or 'type:<type>'.");
+            errors.Add($"{fieldName}: Invalid target '{target}'. Use 'selected', 'last_created', 'turn_created', 'all', 'layer:<name>', 'name:<name>', or 'type:<type>'.");
         }
 
         private static bool IsValidVector3(double[]? v)
@@ -642,10 +869,13 @@ namespace GhCopilot.Core.Rhino
                                     type = "string",
                                     @enum = RhinoActionPlanValidator.SupportedOpNames
                                 },
-                                target = new { type = "string", description = "Selector: 'selected', 'last_created', 'all', 'layer:<name>', 'name:<name>', or 'type:<point|curve|brep|extrusion|surface|mesh|polysurface|solid|subd>'." },
+                                target = new { type = "string", description = "Selector: 'selected', 'last_created', 'turn_created', 'all', 'layer:<name>', 'name:<name>' (supports 'name:A|B'), or 'type:<point|curve|brep|extrusion|surface|mesh|polysurface|solid|subd>'." },
+                                railTarget = text,
+                                subtractTarget = text,
                                 layer = text,
                                 name = text,
                                 loftType = new { type = "string", @enum = new[] { "normal", "loose", "tight", "straight", "uniform" } },
+                                capMode = new { type = "string", @enum = new[] { "flat", "round", "none" } },
                                 displayMode = text,
                                 scope = new { type = "string", @enum = new[] { "extents", "selected" } },
                                 viewName = text,
@@ -666,15 +896,31 @@ namespace GhCopilot.Core.Rhino
                                 depth = number,
                                 height = number,
                                 radius = number,
+                                radius2 = number,
+                                tubeRadius = number,
+                                radiusX = number,
+                                radiusY = number,
+                                startRadius = number,
+                                endRadius = number,
                                 distance = number,
+                                extrudeThickness = number,
                                 angleDegrees = number,
+                                startAngleDegrees = number,
                                 totalAngleDegrees = number,
+                                turns = number,
                                 factor = number,
                                 count = integer,
+                                sides = integer,
                                 closed = boolean,
                                 smooth = boolean,
                                 centered = boolean,
                                 capped = boolean,
+                                inscribed = boolean,
+                                solid = boolean,
+                                chamfer = boolean,
+                                flat = boolean,
+                                copy = boolean,
+                                keepCutters = boolean,
                                 visible = boolean,
                                 clearFirst = boolean
                             },

@@ -7,6 +7,7 @@ using Rhino;
 using Rhino.Display;
 using Rhino.DocObjects;
 using Rhino.Geometry;
+using Rhino.Geometry.Morphs;
 
 namespace GhCopilot.Rhino.Host
 {
@@ -111,14 +112,30 @@ namespace GhCopilot.Rhino.Host
 
             var result = new RhinoExecutionResult();
             var turnCreatedIds = new List<Guid>();
+            var latestOpIds = new List<Guid>();
 
             uint undoSerial = doc.BeginUndoRecord("GH Copilot: Direct Rhino Action");
             try
             {
                 foreach (RhinoActionOp op in plan.Ops)
                 {
-                    ExecuteOp(doc, op, turnCreatedIds, result);
+                    int beforeCount = turnCreatedIds.Count;
+                    ExecuteOp(doc, op, turnCreatedIds, latestOpIds, result);
+                    if (turnCreatedIds.Count > beforeCount)
+                    {
+                        latestOpIds.Clear();
+                        for (int i = beforeCount; i < turnCreatedIds.Count; i++)
+                        {
+                            latestOpIds.Add(turnCreatedIds[i]);
+                        }
+                    }
                 }
+
+                turnCreatedIds.RemoveAll(id =>
+                {
+                    RhinoObject? obj = doc.Objects.FindId(id);
+                    return obj is null || obj.IsDeleted;
+                });
 
                 if (turnCreatedIds.Count > 0)
                 {
@@ -143,7 +160,12 @@ namespace GhCopilot.Rhino.Host
             return result;
         }
 
-        private void ExecuteOp(RhinoDoc doc, RhinoActionOp op, List<Guid> turnCreatedIds, RhinoExecutionResult result)
+        private void ExecuteOp(
+            RhinoDoc doc,
+            RhinoActionOp op,
+            List<Guid> turnCreatedIds,
+            List<Guid> latestOpIds,
+            RhinoExecutionResult result)
         {
             string name = (op.Op ?? string.Empty).Trim().ToLowerInvariant();
             switch (name)
@@ -164,6 +186,39 @@ namespace GhCopilot.Rhino.Host
                     break;
                 }
 
+                case "add_arc":
+                {
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    Arc arc;
+                    if (op.Start != null && op.Point != null && op.End != null)
+                    {
+                        arc = new Arc(ToPoint3d(op.Start), ToPoint3d(op.Point), ToPoint3d(op.End));
+                    }
+                    else
+                    {
+                        Point3d center = ToPoint3d(op.Center ?? op.Origin);
+                        Plane plane = BuildPlane(center, op.Normal);
+                        double startRad = (op.StartAngleDegrees ?? 0.0) * (Math.PI / 180.0);
+                        if (Math.Abs(startRad) > 1e-9)
+                        {
+                            plane.Rotate(startRad, plane.ZAxis, plane.Origin);
+                        }
+                        double sweepRad = op.AngleDegrees!.Value * (Math.PI / 180.0);
+                        arc = new Arc(plane, op.Radius!.Value, sweepRad);
+                    }
+
+                    if (arc.IsValid)
+                    {
+                        Guid id = doc.Objects.AddArc(arc, attrs);
+                        RecordCreated(id, turnCreatedIds, result, "Added arc");
+                    }
+                    else
+                    {
+                        result.Warnings.Add("Could not construct a valid arc from the supplied points/angles.");
+                    }
+                    break;
+                }
+
                 case "add_circle":
                 {
                     ObjectAttributes attrs = BuildAttributes(doc, op, result);
@@ -172,6 +227,52 @@ namespace GhCopilot.Rhino.Host
                     var circle = new Circle(plane, op.Radius!.Value);
                     Guid id = doc.Objects.AddCircle(circle, attrs);
                     RecordCreated(id, turnCreatedIds, result, "Added circle");
+                    break;
+                }
+
+                case "add_ellipse":
+                {
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    Point3d center = ToPoint3d(op.Center ?? op.Origin);
+                    Plane plane = BuildPlane(center, op.Normal);
+                    double rx = op.RadiusX ?? (op.Width!.Value * 0.5);
+                    double ry = op.RadiusY ?? ((op.Depth ?? op.Height)!.Value * 0.5);
+                    var ellipse = new Ellipse(plane, rx, ry);
+                    NurbsCurve? crv = ellipse.ToNurbsCurve();
+                    if (crv != null)
+                    {
+                        Guid id = doc.Objects.AddCurve(crv, attrs);
+                        RecordCreated(id, turnCreatedIds, result, "Added ellipse");
+                    }
+                    else
+                    {
+                        result.Warnings.Add("Failed to build ellipse curve.");
+                    }
+                    break;
+                }
+
+                case "add_polygon":
+                {
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    Point3d center = ToPoint3d(op.Center ?? op.Origin);
+                    Plane plane = BuildPlane(center, op.Normal);
+                    int sides = op.Sides ?? op.Count ?? 6;
+                    double r = op.Radius!.Value;
+                    if (op.Inscribed == false)
+                    {
+                        r /= Math.Cos(Math.PI / sides);
+                    }
+
+                    var pts = new List<Point3d>(sides + 1);
+                    for (int i = 0; i < sides; i++)
+                    {
+                        double angle = (2.0 * Math.PI * i) / sides;
+                        pts.Add(plane.PointAt(r * Math.Cos(angle), r * Math.Sin(angle)));
+                    }
+                    pts.Add(pts[0]);
+
+                    Guid id = doc.Objects.AddPolyline(pts, attrs);
+                    RecordCreated(id, turnCreatedIds, result, $"Added {sides}-sided polygon");
                     break;
                 }
 
@@ -220,6 +321,39 @@ namespace GhCopilot.Rhino.Host
                     }
 
                     RecordCreated(id, turnCreatedIds, result, "Added polyline/curve");
+                    break;
+                }
+
+                case "add_helix":
+                {
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    Point3d axisStart = ToPoint3d(op.Origin ?? op.Start ?? op.Center);
+                    Vector3d axisDir = op.Axis != null
+                        ? ToVector3d(op.Axis)
+                        : (op.Normal != null ? ToVector3d(op.Normal) : Vector3d.ZAxis);
+                    axisDir.Unitize();
+                    double h = op.Height!.Value;
+                    if (h < 0.0)
+                    {
+                        axisDir = -axisDir;
+                        h = -h;
+                    }
+                    double turns = op.Turns!.Value;
+                    double pitch = h / turns;
+                    double r0 = op.Radius!.Value;
+                    double r1 = op.Radius2 ?? r0;
+                    var basePlane = new Plane(axisStart, axisDir);
+                    Point3d radiusPt = basePlane.PointAt(Math.Max(r0, 1e-3), 0.0);
+                    NurbsCurve? spiral = NurbsCurve.CreateSpiral(axisStart, axisDir, radiusPt, pitch, turns, r0, r1);
+                    if (spiral != null)
+                    {
+                        Guid id = doc.Objects.AddCurve(spiral, attrs);
+                        RecordCreated(id, turnCreatedIds, result, "Added helix/spiral curve");
+                    }
+                    else
+                    {
+                        result.Warnings.Add("Failed to build helix/spiral curve.");
+                    }
                     break;
                 }
 
@@ -298,9 +432,28 @@ namespace GhCopilot.Rhino.Host
                     break;
                 }
 
+                case "add_torus":
+                {
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    Point3d center = ToPoint3d(op.Center ?? op.Origin);
+                    Plane plane = BuildPlane(center, op.Normal);
+                    var torus = new Torus(plane, op.Radius!.Value, op.TubeRadius!.Value);
+                    Brep? brep = torus.ToNurbsSurface()?.ToBrep();
+                    if (brep != null)
+                    {
+                        Guid id = doc.Objects.AddBrep(brep, attrs);
+                        RecordCreated(id, turnCreatedIds, result, "Added torus");
+                    }
+                    else
+                    {
+                        result.Warnings.Add("Failed to build torus Brep from parameters.");
+                    }
+                    break;
+                }
+
                 case "extrude":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     int extruded = 0;
                     bool capped = op.Capped != false;
                     double h = op.Height!.Value;
@@ -350,7 +503,7 @@ namespace GhCopilot.Rhino.Host
 
                 case "loft":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false, preferMultipleTurnCreated: true);
                     var curves = new List<Curve>();
                     foreach (RhinoObject obj in targets)
                     {
@@ -373,9 +526,15 @@ namespace GhCopilot.Rhino.Host
 
                     ObjectAttributes attrs = BuildAttributes(doc, op, result);
                     int created = 0;
-                    foreach (Brep b in breps)
+                    foreach (Brep rawBrep in breps)
                     {
-                        Guid id = doc.Objects.AddBrep(b, attrs);
+                        Brep toAdd = rawBrep;
+                        if (op.Capped == true)
+                        {
+                            Brep? cappedBrep = rawBrep.CapPlanarHoles(doc.ModelAbsoluteTolerance);
+                            if (cappedBrep != null) toAdd = cappedBrep;
+                        }
+                        Guid id = doc.Objects.AddBrep(toAdd, attrs);
                         if (id != Guid.Empty)
                         {
                             turnCreatedIds.Add(id);
@@ -387,9 +546,197 @@ namespace GhCopilot.Rhino.Host
                     break;
                 }
 
+                case "revolve":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    Point3d axisOrigin = ToPoint3d(op.Origin ?? op.Center);
+                    Vector3d axisDir = op.Axis != null ? ToVector3d(op.Axis) : Vector3d.ZAxis;
+                    axisDir.Unitize();
+                    var axisLine = new Line(axisOrigin, axisOrigin + axisDir * 10.0);
+                    double sweepDeg = op.AngleDegrees ?? 360.0;
+                    double endRad = sweepDeg * (Math.PI / 180.0);
+                    bool capped = op.Capped != false;
+                    ObjectAttributes? customAttrs = HasAttributeOverride(op) ? BuildAttributes(doc, op, result) : null;
+                    int created = 0;
+
+                    foreach (RhinoObject obj in targets)
+                    {
+                        if (obj.Geometry is not Curve crv) continue;
+                        RevSurface? rev = RevSurface.Create(crv, axisLine, 0.0, endRad);
+                        if (rev is null) continue;
+                        Brep? brep = Brep.CreateFromRevSurface(rev, capped, capped);
+                        if (brep is null) continue;
+                        ObjectAttributes attrs = customAttrs != null ? customAttrs.Duplicate() : obj.Attributes.Duplicate();
+                        Guid id = doc.Objects.AddBrep(brep, attrs);
+                        if (id != Guid.Empty)
+                        {
+                            turnCreatedIds.Add(id);
+                            result.CreatedCount++;
+                            created++;
+                        }
+                    }
+
+                    if (created == 0) result.Warnings.Add("No valid profile curves could be revolved.");
+                    else result.AppliedNotes.Add($"Revolved {created} surface/solid(s)");
+                    break;
+                }
+
+                case "sweep1":
+                {
+                    Curve? rail = null;
+                    var shapes = new List<Curve>();
+                    if (!string.IsNullOrWhiteSpace(op.RailTarget))
+                    {
+                        List<RhinoObject> railObjs = ResolveTargets(doc, op.RailTarget, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                        rail = railObjs.Select(o => o.Geometry as Curve).FirstOrDefault(c => c != null);
+                        List<RhinoObject> sectionObjs = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                        foreach (RhinoObject so in sectionObjs)
+                        {
+                            if (so.Geometry is Curve c && !ReferenceEquals(c, rail)) shapes.Add(c);
+                        }
+                    }
+                    else
+                    {
+                        List<RhinoObject> allObjs = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false, preferMultipleTurnCreated: true);
+                        foreach (RhinoObject o in allObjs)
+                        {
+                            if (o.Geometry is Curve c)
+                            {
+                                if (rail is null) rail = c;
+                                else shapes.Add(c);
+                            }
+                        }
+                    }
+
+                    if (rail is null || shapes.Count == 0)
+                    {
+                        result.Warnings.Add("Sweep1 requires 1 rail curve and at least 1 cross-section curve.");
+                        break;
+                    }
+
+                    Brep[]? swept = Brep.CreateFromSweep(rail, shapes, op.Closed == true, doc.ModelAbsoluteTolerance);
+                    if (swept is null || swept.Length == 0)
+                    {
+                        result.Warnings.Add("Sweep1 could not create a surface/Brep from the rail and section curves.");
+                        break;
+                    }
+
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    int created = 0;
+                    foreach (Brep rawBrep in swept)
+                    {
+                        Brep toAdd = rawBrep;
+                        if (op.Capped != false)
+                        {
+                            Brep? cappedBrep = rawBrep.CapPlanarHoles(doc.ModelAbsoluteTolerance);
+                            if (cappedBrep != null) toAdd = cappedBrep;
+                        }
+                        Guid id = doc.Objects.AddBrep(toAdd, attrs);
+                        if (id != Guid.Empty)
+                        {
+                            turnCreatedIds.Add(id);
+                            result.CreatedCount++;
+                            created++;
+                        }
+                    }
+                    result.AppliedNotes.Add($"Swept {created} Brep(s)");
+                    break;
+                }
+
+                case "pipe":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    PipeCapMode cap = ParsePipeCapMode(op.CapMode);
+                    double r1 = op.Radius!.Value;
+                    double absTol = doc.ModelAbsoluteTolerance;
+                    double angTol = doc.ModelAngleToleranceRadians;
+                    ObjectAttributes? customAttrs = HasAttributeOverride(op) ? BuildAttributes(doc, op, result) : null;
+                    int created = 0;
+
+                    foreach (RhinoObject obj in targets)
+                    {
+                        if (obj.Geometry is not Curve crv) continue;
+                        Curve railCopy = crv.DuplicateCurve();
+                        railCopy.Domain = new Interval(0.0, 1.0);
+                        Brep[]? pipes = op.Radius2.HasValue
+                            ? Brep.CreatePipe(railCopy, new[] { 0.0, 1.0 }, new[] { r1, op.Radius2.Value }, false, cap, true, absTol, angTol)
+                            : Brep.CreatePipe(railCopy, r1, false, cap, true, absTol, angTol);
+                        if (pipes is null) continue;
+
+                        ObjectAttributes attrs = customAttrs != null ? customAttrs.Duplicate() : obj.Attributes.Duplicate();
+                        foreach (Brep p in pipes)
+                        {
+                            Guid id = doc.Objects.AddBrep(p, attrs);
+                            if (id != Guid.Empty)
+                            {
+                                turnCreatedIds.Add(id);
+                                result.CreatedCount++;
+                                created++;
+                            }
+                        }
+                    }
+
+                    if (created == 0) result.Warnings.Add("No valid curves found to pipe.");
+                    else result.AppliedNotes.Add($"Piped {created} tubular Brep(s)");
+                    break;
+                }
+
+                case "planar_srf":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false, preferMultipleTurnCreated: true);
+                    var curves = targets.Select(o => o.Geometry as Curve).Where(c => c != null).Cast<Curve>().ToList();
+                    if (curves.Count == 0)
+                    {
+                        result.Warnings.Add("planar_srf requires at least 1 closed planar curve.");
+                        break;
+                    }
+
+                    Brep[]? planar = Brep.CreatePlanarBreps(curves, doc.ModelAbsoluteTolerance);
+                    if (planar is null || planar.Length == 0)
+                    {
+                        result.Warnings.Add("Curves were not closed/coplanar enough to build planar surfaces.");
+                        break;
+                    }
+
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    int created = 0;
+                    foreach (Brep b in planar)
+                    {
+                        Guid id = doc.Objects.AddBrep(b, attrs);
+                        if (id != Guid.Empty)
+                        {
+                            turnCreatedIds.Add(id);
+                            result.CreatedCount++;
+                            created++;
+                        }
+                    }
+                    result.AppliedNotes.Add($"Created {created} planar surface(s)");
+                    break;
+                }
+
+                case "cap_planar_holes":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    int cappedCount = 0;
+                    foreach (RhinoObject obj in targets)
+                    {
+                        Brep? brep = ToBrepFromObject(obj);
+                        if (brep is null) continue;
+                        Brep? capped = brep.CapPlanarHoles(doc.ModelAbsoluteTolerance);
+                        if (capped != null && doc.Objects.Replace(obj.Id, capped))
+                        {
+                            cappedCount++;
+                        }
+                    }
+                    result.ModifiedCount += cappedCount;
+                    if (cappedCount == 0) result.Warnings.Add("No open planar holes could be capped on target Breps.");
+                    else result.AppliedNotes.Add($"Capped planar holes on {cappedCount} Brep(s)");
+                    break;
+                }
+
                 case "offset_curve":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     int created = 0;
                     double dist = op.Distance!.Value;
                     Plane offsetPlane = BuildPlane(Point3d.Origin, op.Normal);
@@ -419,39 +766,292 @@ namespace GhCopilot.Rhino.Host
                     break;
                 }
 
+                case "offset_surface":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    double dist = op.Distance!.Value;
+                    bool solid = op.Solid != false;
+                    ObjectAttributes? customAttrs = HasAttributeOverride(op) ? BuildAttributes(doc, op, result) : null;
+                    int created = 0;
+
+                    foreach (RhinoObject obj in targets)
+                    {
+                        Brep? brep = ToBrepFromObject(obj);
+                        if (brep is null) continue;
+                        Brep[]? offsets = Brep.CreateOffsetBrep(brep, dist, solid, extend: false, doc.ModelAbsoluteTolerance, out _, out _);
+                        if (offsets is null) continue;
+
+                        ObjectAttributes attrs = customAttrs != null ? customAttrs.Duplicate() : obj.Attributes.Duplicate();
+                        foreach (Brep off in offsets)
+                        {
+                            Guid id = doc.Objects.AddBrep(off, attrs);
+                            if (id != Guid.Empty)
+                            {
+                                turnCreatedIds.Add(id);
+                                result.CreatedCount++;
+                                created++;
+                            }
+                        }
+                    }
+
+                    if (created == 0) result.Warnings.Add("No valid surfaces/Breps found to offset into shells.");
+                    else result.AppliedNotes.Add($"Offset {created} shell/surface Brep(s)");
+                    break;
+                }
+
+                case "fillet_edges":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    double r = op.Radius!.Value;
+                    BlendType blend = op.Chamfer == true ? BlendType.Chamfer : BlendType.Fillet;
+                    ObjectAttributes? customAttrs = HasAttributeOverride(op) ? BuildAttributes(doc, op, result) : null;
+                    int created = 0;
+
+                    foreach (RhinoObject obj in targets)
+                    {
+                        Brep? brep = ToBrepFromObject(obj);
+                        if (brep is null || brep.Edges.Count == 0) continue;
+                        int edgeCount = brep.Edges.Count;
+                        int[] indices = Enumerable.Range(0, edgeCount).ToArray();
+                        double[] radii = Enumerable.Repeat(r, edgeCount).ToArray();
+                        Brep[]? filleted = Brep.CreateFilletEdges(brep, indices, radii, radii, blend, RailType.RollingBall, doc.ModelAbsoluteTolerance);
+                        if (filleted is null || filleted.Length == 0) continue;
+
+                        ObjectAttributes attrs = customAttrs != null ? customAttrs.Duplicate() : obj.Attributes.Duplicate();
+                        Guid oldId = obj.Id;
+                        doc.Objects.Delete(obj, quiet: true);
+                        turnCreatedIds.Remove(oldId);
+                        result.DeletedCount++;
+
+                        foreach (Brep fb in filleted)
+                        {
+                            Guid id = doc.Objects.AddBrep(fb, attrs);
+                            if (id != Guid.Empty)
+                            {
+                                turnCreatedIds.Add(id);
+                                result.CreatedCount++;
+                                created++;
+                            }
+                        }
+                    }
+
+                    if (created == 0) result.Warnings.Add("Fillet/chamfer could not be applied at the requested radius.");
+                    else result.AppliedNotes.Add($"Applied {(op.Chamfer == true ? "chamfer" : "fillet")} to {created} solid(s)");
+                    break;
+                }
+
+                case "boolean_union":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false, preferMultipleTurnCreated: true);
+                    var pairs = new List<(RhinoObject Obj, Brep Solid)>();
+                    foreach (RhinoObject obj in targets)
+                    {
+                        Brep? b = ToBrepFromObject(obj);
+                        if (b != null) pairs.Add((obj, b));
+                    }
+
+                    if (pairs.Count < 2)
+                    {
+                        result.Warnings.Add("boolean_union requires at least 2 target solids/Breps.");
+                        break;
+                    }
+
+                    Brep[]? unioned = Brep.CreateBooleanUnion(pairs.Select(p => p.Solid), doc.ModelAbsoluteTolerance);
+                    if (unioned is null || unioned.Length == 0)
+                    {
+                        result.Warnings.Add("Boolean union did not find intersecting solid volumes.");
+                        break;
+                    }
+
+                    ObjectAttributes attrs = HasAttributeOverride(op) ? BuildAttributes(doc, op, result) : pairs[0].Obj.Attributes.Duplicate();
+                    if (op.KeepCutters != true)
+                    {
+                        foreach ((RhinoObject srcObj, _) in pairs)
+                        {
+                            if (doc.Objects.Delete(srcObj, quiet: true))
+                            {
+                                turnCreatedIds.Remove(srcObj.Id);
+                                result.DeletedCount++;
+                            }
+                        }
+                    }
+
+                    int created = 0;
+                    foreach (Brep ub in unioned)
+                    {
+                        Guid id = doc.Objects.AddBrep(ub, attrs.Duplicate());
+                        if (id != Guid.Empty)
+                        {
+                            turnCreatedIds.Add(id);
+                            result.CreatedCount++;
+                            created++;
+                        }
+                    }
+                    result.AppliedNotes.Add($"Boolean-unioned into {created} solid(s)");
+                    break;
+                }
+
+                case "boolean_difference":
+                case "boolean_intersection":
+                {
+                    bool isDiff = name == "boolean_difference";
+                    List<RhinoObject> baseObjs = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> cutterObjs = ResolveTargets(doc, op.SubtractTarget, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    var cutterIdSet = new HashSet<Guid>(cutterObjs.Select(o => o.Id));
+                    baseObjs.RemoveAll(o => cutterIdSet.Contains(o.Id));
+
+                    List<Brep> baseBreps = baseObjs.Select(ToBrepFromObject).Where(b => b != null).Cast<Brep>().ToList();
+                    List<Brep> cutterBreps = cutterObjs.Select(ToBrepFromObject).Where(b => b != null).Cast<Brep>().ToList();
+                    if (baseBreps.Count == 0 || cutterBreps.Count == 0)
+                    {
+                        result.Warnings.Add($"{name} requires valid base solid(s) in 'target' and cutter solid(s) in 'subtractTarget'.");
+                        break;
+                    }
+
+                    Brep[]? boolResult = isDiff
+                        ? Brep.CreateBooleanDifference(baseBreps, cutterBreps, doc.ModelAbsoluteTolerance)
+                        : Brep.CreateBooleanIntersection(baseBreps, cutterBreps, doc.ModelAbsoluteTolerance);
+
+                    if (boolResult is null || boolResult.Length == 0)
+                    {
+                        result.Warnings.Add($"{name} produced an empty result (verify solids overlap cleanly).");
+                        break;
+                    }
+
+                    ObjectAttributes attrs = HasAttributeOverride(op) ? BuildAttributes(doc, op, result) : baseObjs[0].Attributes.Duplicate();
+                    foreach (RhinoObject bObj in baseObjs)
+                    {
+                        if (doc.Objects.Delete(bObj, quiet: true))
+                        {
+                            turnCreatedIds.Remove(bObj.Id);
+                            result.DeletedCount++;
+                        }
+                    }
+                    if (op.KeepCutters != true)
+                    {
+                        foreach (RhinoObject cObj in cutterObjs)
+                        {
+                            if (doc.Objects.Delete(cObj, quiet: true))
+                            {
+                                turnCreatedIds.Remove(cObj.Id);
+                                result.DeletedCount++;
+                            }
+                        }
+                    }
+
+                    int created = 0;
+                    foreach (Brep rb in boolResult)
+                    {
+                        Guid id = doc.Objects.AddBrep(rb, attrs.Duplicate());
+                        if (id != Guid.Empty)
+                        {
+                            turnCreatedIds.Add(id);
+                            result.CreatedCount++;
+                            created++;
+                        }
+                    }
+                    result.AppliedNotes.Add($"{(isDiff ? "Boolean difference" : "Boolean intersection")} created {created} solid(s)");
+                    break;
+                }
+
+                case "contour_slice":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    BoundingBox bounds = ComputeBoundingBox(targets);
+                    if (!bounds.IsValid)
+                    {
+                        result.Warnings.Add("No valid geometry found for contour_slice.");
+                        break;
+                    }
+
+                    Point3d cStart = op.Start != null ? ToPoint3d(op.Start) : new Point3d(bounds.Center.X, bounds.Center.Y, bounds.Min.Z);
+                    Point3d cEnd = op.End != null ? ToPoint3d(op.End) : new Point3d(bounds.Center.X, bounds.Center.Y, bounds.Max.Z);
+                    Vector3d sliceDir = cEnd - cStart;
+                    if (sliceDir.Length <= 1e-6)
+                    {
+                        sliceDir = Vector3d.ZAxis;
+                        cEnd = cStart + sliceDir * Math.Max(1.0, bounds.Max.Z - bounds.Min.Z);
+                    }
+                    sliceDir.Unitize();
+
+                    ObjectAttributes attrs = BuildAttributes(doc, op, result);
+                    int created = 0;
+                    double spacing = op.Distance!.Value;
+                    double? slabThickness = op.ExtrudeThickness;
+
+                    foreach (RhinoObject obj in targets)
+                    {
+                        Brep? brep = ToBrepFromObject(obj);
+                        if (brep is null) continue;
+                        Curve[]? contours = Brep.CreateContourCurves(brep, cStart, cEnd, spacing);
+                        if (contours is null) continue;
+
+                        foreach (Curve contour in contours)
+                        {
+                            if (slabThickness.HasValue && slabThickness.Value > 0.0)
+                            {
+                                Extrusion? slab = Extrusion.Create(contour, slabThickness.Value, cap: true);
+                                if (slab != null)
+                                {
+                                    Guid slabId = doc.Objects.AddExtrusion(slab, attrs.Duplicate());
+                                    if (slabId != Guid.Empty)
+                                    {
+                                        turnCreatedIds.Add(slabId);
+                                        result.CreatedCount++;
+                                        created++;
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            Guid id = doc.Objects.AddCurve(contour, attrs.Duplicate());
+                            if (id != Guid.Empty)
+                            {
+                                turnCreatedIds.Add(id);
+                                result.CreatedCount++;
+                                created++;
+                            }
+                        }
+                    }
+
+                    if (created == 0) result.Warnings.Add("contour_slice produced zero slices.");
+                    else result.AppliedNotes.Add($"Created {created} contour {(slabThickness.HasValue ? "slab(s)" : "curve(s)")}");
+                    break;
+                }
+
                 case "move":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     Transform xform = Transform.Translation(ToVector3d(op.Vector));
-                    ApplyTransform(doc, targets, xform, deleteOriginal: true, turnCreatedIds, result, "Moved");
+                    ApplyTransform(doc, targets, xform, deleteOriginal: true, turnCreatedIds, latestOpIds, result, "Moved");
                     break;
                 }
 
                 case "copy":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     Vector3d delta = op.Vector != null ? ToVector3d(op.Vector) : Vector3d.Zero;
                     Transform xform = Transform.Translation(delta);
-                    ApplyTransform(doc, targets, xform, deleteOriginal: false, turnCreatedIds, result, "Copied");
+                    ApplyTransform(doc, targets, xform, deleteOriginal: false, turnCreatedIds, latestOpIds, result, "Copied");
                     break;
                 }
 
                 case "rotate":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     Point3d pivot = op.Center != null || op.Origin != null
                         ? ToPoint3d(op.Center ?? op.Origin)
                         : ComputeAnchor(targets);
                     Vector3d axis = op.Axis != null ? ToVector3d(op.Axis) : Vector3d.ZAxis;
                     double radians = op.AngleDegrees!.Value * (Math.PI / 180.0);
                     Transform xform = Transform.Rotation(radians, axis, pivot);
-                    ApplyTransform(doc, targets, xform, deleteOriginal: true, turnCreatedIds, result, "Rotated");
+                    ApplyTransform(doc, targets, xform, deleteOriginal: true, turnCreatedIds, latestOpIds, result, "Rotated");
                     break;
                 }
 
                 case "scale":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     Point3d pivot = op.Center != null || op.Origin != null
                         ? ToPoint3d(op.Center ?? op.Origin)
                         : ComputeAnchor(targets);
@@ -466,13 +1066,88 @@ namespace GhCopilot.Rhino.Host
                     {
                         xform = Transform.Scale(pivot, op.Factor!.Value);
                     }
-                    ApplyTransform(doc, targets, xform, deleteOriginal: true, turnCreatedIds, result, "Scaled");
+                    ApplyTransform(doc, targets, xform, deleteOriginal: true, turnCreatedIds, latestOpIds, result, "Scaled");
+                    break;
+                }
+
+                case "mirror":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    Point3d origin = ToPoint3d(op.Origin ?? op.Center);
+                    Vector3d normal = op.Normal != null ? ToVector3d(op.Normal) : Vector3d.XAxis;
+                    var mirrorPlane = new Plane(origin, normal);
+                    Transform xform = Transform.Mirror(mirrorPlane);
+                    bool copy = op.Copy != false;
+                    ApplyTransform(doc, targets, xform, deleteOriginal: !copy, turnCreatedIds, latestOpIds, result, copy ? "Mirrored (copy)" : "Mirrored");
+                    break;
+                }
+
+                case "twist":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    BoundingBox bounds = ComputeBoundingBox(targets);
+                    if (!bounds.IsValid)
+                    {
+                        result.Warnings.Add("No target objects matched for twist.");
+                        break;
+                    }
+
+                    Point3d axisStart = op.Start != null || op.Origin != null
+                        ? ToPoint3d(op.Start ?? op.Origin)
+                        : new Point3d(bounds.Center.X, bounds.Center.Y, bounds.Min.Z);
+                    Point3d axisEnd = op.End != null
+                        ? ToPoint3d(op.End)
+                        : (op.Axis != null
+                            ? axisStart + ToVector3d(op.Axis) * Math.Max(1.0, bounds.Max.Z - bounds.Min.Z)
+                            : new Point3d(bounds.Center.X, bounds.Center.Y, Math.Max(bounds.Min.Z + 1.0, bounds.Max.Z)));
+
+                    var morph = new TwistSpaceMorph
+                    {
+                        TwistAxis = new Line(axisStart, axisEnd),
+                        TwistAngleRadians = op.AngleDegrees!.Value * (Math.PI / 180.0),
+                        InfiniteTwist = false,
+                        Tolerance = doc.ModelAbsoluteTolerance
+                    };
+
+                    ApplySpaceMorph(doc, targets, morph, turnCreatedIds, latestOpIds, result, "Twisted");
+                    break;
+                }
+
+                case "taper":
+                {
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
+                    BoundingBox bounds = ComputeBoundingBox(targets);
+                    if (!bounds.IsValid)
+                    {
+                        result.Warnings.Add("No target objects matched for taper.");
+                        break;
+                    }
+
+                    Point3d axisStart = op.Start != null || op.Origin != null
+                        ? ToPoint3d(op.Start ?? op.Origin)
+                        : new Point3d(bounds.Center.X, bounds.Center.Y, bounds.Min.Z);
+                    Point3d axisEnd = op.End != null
+                        ? ToPoint3d(op.End)
+                        : new Point3d(bounds.Center.X, bounds.Center.Y, Math.Max(bounds.Min.Z + 1.0, bounds.Max.Z));
+
+                    var morph = new TaperSpaceMorph(
+                        axisStart,
+                        axisEnd,
+                        op.StartRadius!.Value,
+                        op.EndRadius!.Value,
+                        op.Flat == true,
+                        infiniteTaper: false)
+                    {
+                        Tolerance = doc.ModelAbsoluteTolerance
+                    };
+
+                    ApplySpaceMorph(doc, targets, morph, turnCreatedIds, latestOpIds, result, "Tapered");
                     break;
                 }
 
                 case "array_linear":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     if (targets.Count == 0)
                     {
                         result.Warnings.Add("No target objects matched for linear array.");
@@ -502,7 +1177,7 @@ namespace GhCopilot.Rhino.Host
 
                 case "array_polar":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     if (targets.Count == 0)
                     {
                         result.Warnings.Add("No target objects matched for polar array.");
@@ -539,12 +1214,15 @@ namespace GhCopilot.Rhino.Host
 
                 case "delete":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     int deleted = 0;
                     foreach (RhinoObject obj in targets)
                     {
+                        Guid deadId = obj.Id;
                         if (doc.Objects.Delete(obj, quiet: true))
                         {
+                            turnCreatedIds.Remove(deadId);
+                            latestOpIds.Remove(deadId);
                             deleted++;
                         }
                     }
@@ -578,7 +1256,7 @@ namespace GhCopilot.Rhino.Host
                         break;
                     }
 
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     int updated = 0;
                     foreach (RhinoObject obj in targets)
                     {
@@ -599,7 +1277,7 @@ namespace GhCopilot.Rhino.Host
                 {
                     int[] rgb = op.Color!;
                     Color color = Color.FromArgb(ClampByte(rgb[0]), ClampByte(rgb[1]), ClampByte(rgb[2]));
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     int updated = 0;
                     foreach (RhinoObject obj in targets)
                     {
@@ -619,7 +1297,7 @@ namespace GhCopilot.Rhino.Host
 
                 case "rename":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     string newName = op.Name!.Trim();
                     int updated = 0;
                     foreach (RhinoObject obj in targets)
@@ -644,7 +1322,7 @@ namespace GhCopilot.Rhino.Host
                         doc.Objects.UnselectAll();
                     }
 
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     var ids = targets.Select(o => o.Id).ToList();
                     int selected = ids.Count > 0 ? doc.Objects.Select(ids) : 0;
                     result.AppliedNotes.Add($"Selected {selected} object(s)");
@@ -653,7 +1331,7 @@ namespace GhCopilot.Rhino.Host
 
                 case "hide":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: false);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: false);
                     int hidden = 0;
                     foreach (RhinoObject obj in targets)
                     {
@@ -670,7 +1348,7 @@ namespace GhCopilot.Rhino.Host
 
                 case "show":
                 {
-                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, defaultToAllWhenShow: true);
+                    List<RhinoObject> targets = ResolveTargets(doc, op.Target, turnCreatedIds, latestOpIds, defaultToAllWhenShow: true);
                     int shown = 0;
                     foreach (RhinoObject obj in targets)
                     {
@@ -810,6 +1488,7 @@ namespace GhCopilot.Rhino.Host
             Transform xform,
             bool deleteOriginal,
             List<Guid> turnCreatedIds,
+            List<Guid> latestOpIds,
             RhinoExecutionResult result,
             string verb)
         {
@@ -833,6 +1512,8 @@ namespace GhCopilot.Rhino.Host
                     {
                         int idx = turnCreatedIds.IndexOf(oldId);
                         if (idx >= 0) turnCreatedIds[idx] = newId;
+                        int latestIdx = latestOpIds.IndexOf(oldId);
+                        if (latestIdx >= 0) latestOpIds[latestIdx] = newId;
                     }
                     else
                     {
@@ -855,11 +1536,68 @@ namespace GhCopilot.Rhino.Host
             result.AppliedNotes.Add($"{verb} {affected} object(s)");
         }
 
+        private static void ApplySpaceMorph(
+            RhinoDoc doc,
+            List<RhinoObject> targets,
+            SpaceMorph morph,
+            List<Guid> turnCreatedIds,
+            List<Guid> latestOpIds,
+            RhinoExecutionResult result,
+            string verb)
+        {
+            int morphed = 0;
+            foreach (RhinoObject obj in targets)
+            {
+                if (obj.Geometry is null) continue;
+                // Convert linear Extrusions to NURBS Breps before non-affine space morphing so twists/tapers deform smoothly.
+                GeometryBase dup = (obj.Geometry is Extrusion ext ? (GeometryBase?)ext.ToBrep() : null)
+                                   ?? obj.Geometry.Duplicate();
+                if (!morph.Morph(dup)) continue;
+
+                ObjectAttributes attrs = obj.Attributes.Duplicate();
+                Guid oldId = obj.Id;
+                if (dup is Brep morphedBrep)
+                {
+                    if (doc.Objects.Replace(oldId, morphedBrep))
+                    {
+                        morphed++;
+                        continue;
+                    }
+                    if (doc.Objects.Delete(obj, quiet: true))
+                    {
+                        Guid newId = doc.Objects.AddBrep(morphedBrep, attrs);
+                        if (newId != Guid.Empty)
+                        {
+                            int idx = turnCreatedIds.IndexOf(oldId);
+                            if (idx >= 0) turnCreatedIds[idx] = newId;
+                            int lIdx = latestOpIds.IndexOf(oldId);
+                            if (lIdx >= 0) latestOpIds[lIdx] = newId;
+                            morphed++;
+                        }
+                    }
+                }
+                else if (dup is Curve morphedCurve && doc.Objects.Replace(oldId, morphedCurve))
+                {
+                    morphed++;
+                }
+                else if (dup is Mesh morphedMesh && doc.Objects.Replace(oldId, morphedMesh))
+                {
+                    morphed++;
+                }
+            }
+
+            result.ModifiedCount += morphed;
+            if (morphed == 0) result.Warnings.Add($"{verb} could not deform the target geometry.");
+            else result.AppliedNotes.Add($"{verb} {morphed} object(s)");
+        }
+
         private List<RhinoObject> ResolveTargets(
             RhinoDoc doc,
             string? rawTarget,
             List<Guid> turnCreatedIds,
-            bool defaultToAllWhenShow)
+            List<Guid> latestOpIds,
+            bool defaultToAllWhenShow,
+            bool preferMultipleTurnCreated = false)
         {
             string target = string.IsNullOrWhiteSpace(rawTarget)
                 ? string.Empty
@@ -875,7 +1613,7 @@ namespace GhCopilot.Rhino.Host
                 {
                     List<RhinoObject> selected = CollectSelected(doc);
                     if (selected.Count > 0) return selected;
-                    if (turnCreatedIds.Count > 0 || _lastCreatedIds.Count > 0) target = "last_created";
+                    if (latestOpIds.Count > 0 || turnCreatedIds.Count > 0 || _lastCreatedIds.Count > 0) target = "last_created";
                     else return selected;
                 }
             }
@@ -885,19 +1623,29 @@ namespace GhCopilot.Rhino.Host
                 return CollectSelected(doc);
             }
 
+            if (string.Equals(target, "turn_created", StringComparison.OrdinalIgnoreCase))
+            {
+                IEnumerable<Guid> turnSource = turnCreatedIds.Count > 0 ? turnCreatedIds : _lastCreatedIds;
+                return CollectLiveObjects(doc, turnSource);
+            }
+
             if (string.Equals(target, "last_created", StringComparison.OrdinalIgnoreCase))
             {
-                IEnumerable<Guid> source = turnCreatedIds.Count > 0 ? turnCreatedIds : _lastCreatedIds;
-                var list = new List<RhinoObject>();
-                foreach (Guid id in source)
+                IEnumerable<Guid> source;
+                if (preferMultipleTurnCreated && latestOpIds.Count < 2 && turnCreatedIds.Count >= 2)
                 {
-                    RhinoObject? obj = doc.Objects.FindId(id);
-                    if (obj != null && !obj.IsDeleted)
-                    {
-                        list.Add(obj);
-                    }
+                    source = turnCreatedIds;
                 }
-                return list;
+                else if (latestOpIds.Count > 0)
+                {
+                    source = latestOpIds;
+                }
+                else
+                {
+                    source = turnCreatedIds.Count > 0 ? turnCreatedIds : _lastCreatedIds;
+                }
+
+                return CollectLiveObjects(doc, source);
             }
 
             var settings = new ObjectEnumeratorSettings
@@ -929,9 +1677,26 @@ namespace GhCopilot.Rhino.Host
 
             if (target.StartsWith("name:", StringComparison.OrdinalIgnoreCase))
             {
-                string objName = target.Substring("name:".Length).Trim();
-                settings.NameFilter = objName;
-                return doc.Objects.GetObjectList(settings)?.ToList() ?? new List<RhinoObject>();
+                string rawNames = target.Substring("name:".Length);
+                string[] parts = rawNames.Split(new[] { '|', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                var matched = new List<RhinoObject>();
+                var seen = new HashSet<Guid>();
+                foreach (string part in parts)
+                {
+                    string objName = part.Trim();
+                    if (string.IsNullOrEmpty(objName)) continue;
+                    settings.NameFilter = objName;
+                    IEnumerable<RhinoObject>? found = doc.Objects.GetObjectList(settings);
+                    if (found is null) continue;
+                    foreach (RhinoObject o in found)
+                    {
+                        if (o != null && !o.IsDeleted && seen.Add(o.Id))
+                        {
+                            matched.Add(o);
+                        }
+                    }
+                }
+                return matched;
             }
 
             if (target.StartsWith("type:", StringComparison.OrdinalIgnoreCase))
@@ -1106,6 +1871,12 @@ namespace GhCopilot.Rhino.Host
 
         private static Point3d ComputeAnchor(List<RhinoObject> targets)
         {
+            BoundingBox bounds = ComputeBoundingBox(targets);
+            return bounds.IsValid ? bounds.Center : Point3d.Origin;
+        }
+
+        private static BoundingBox ComputeBoundingBox(List<RhinoObject> targets)
+        {
             BoundingBox bounds = BoundingBox.Unset;
             foreach (RhinoObject obj in targets)
             {
@@ -1116,7 +1887,40 @@ namespace GhCopilot.Rhino.Host
                     bounds = bounds.IsValid ? BoundingBox.Union(bounds, box) : box;
                 }
             }
-            return bounds.IsValid ? bounds.Center : Point3d.Origin;
+            return bounds;
+        }
+
+        private static List<RhinoObject> CollectLiveObjects(RhinoDoc doc, IEnumerable<Guid> ids)
+        {
+            var list = new List<RhinoObject>();
+            foreach (Guid id in ids)
+            {
+                RhinoObject? obj = doc.Objects.FindId(id);
+                if (obj != null && !obj.IsDeleted)
+                {
+                    list.Add(obj);
+                }
+            }
+            return list;
+        }
+
+        private static Brep? ToBrepFromObject(RhinoObject? obj)
+        {
+            if (obj?.Geometry is null) return null;
+            if (obj.Geometry is Brep brep) return brep.DuplicateBrep();
+            if (obj.Geometry is Extrusion ext) return ext.ToBrep();
+            if (obj.Geometry is Surface srf) return srf.ToBrep();
+            return null;
+        }
+
+        private static PipeCapMode ParsePipeCapMode(string? capMode)
+        {
+            switch ((capMode ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "round": return PipeCapMode.Round;
+                case "none": return PipeCapMode.None;
+                default: return PipeCapMode.Flat;
+            }
         }
 
         private static LoftType ParseLoftType(string? loftType)

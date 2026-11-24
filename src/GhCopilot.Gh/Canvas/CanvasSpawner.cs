@@ -419,11 +419,34 @@ namespace GhCopilot.Gh.Canvas
                     slider.Slider.DecimalPlaces = decimals;
                 }
 
-                decimal min = (decimal)(node.Settings.Min ?? 0.0);
-                decimal max = (decimal)(node.Settings.Max ?? 100.0);
-                if (max < min)
+                double rawMin = node.Settings.Min ?? 0.0;
+                double rawMax = node.Settings.Max ?? 100.0;
+                if (node.Settings.Value.HasValue)
                 {
-                    max = min;
+                    double rawVal = node.Settings.Value.Value;
+                    if (!node.Settings.Min.HasValue && rawVal < rawMin)
+                    {
+                        rawMin = Math.Min(rawVal * 2.0, rawVal - 10.0);
+                    }
+                    if (!node.Settings.Max.HasValue && rawVal > rawMax)
+                    {
+                        rawMax = Math.Max(rawVal * 2.0, rawVal + 10.0);
+                    }
+                }
+                if (!node.Settings.Max.HasValue && rawMin >= rawMax)
+                {
+                    rawMax = rawMin + 100.0;
+                }
+                else if (!node.Settings.Min.HasValue && rawMax <= rawMin)
+                {
+                    rawMin = rawMax - 100.0;
+                }
+
+                decimal min = (decimal)rawMin;
+                decimal max = (decimal)rawMax;
+                if (max <= min)
+                {
+                    max = min + 1m;
                 }
 
                 slider.Slider.Minimum = min;

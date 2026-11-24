@@ -710,7 +710,8 @@ namespace GhCopilot.UI
             }
 
             ChatSession session = CopilotHostRegistry.SharedSession;
-            if (RhinoPromptBuilder.HasExplicitGrasshopperIntent(prompt))
+            if (RhinoPromptBuilder.HasExplicitGrasshopperIntent(prompt) ||
+                ChatPromptBuilder.RequestsRhinoSelectionInPrompt(prompt))
             {
                 return CopilotWorkMode.Grasshopper;
             }
@@ -974,9 +975,7 @@ namespace GhCopilot.UI
                                 (response.IsSuccess ? "" : "[Error] ") + answer,
                                 thoughtSummary,
                                 elapsedSeconds,
-                                response.IsPlanProposal,
-                                response.ViewportImageBase64Png,
-                                response.ViewportVerificationSummary);
+                                response.IsPlanProposal);
 
                             var combinedMessages = new List<string>();
                             foreach (string warning in response.ValidatorWarnings) combinedMessages.Add("[Validator] " + warning);
