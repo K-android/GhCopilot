@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFrameworks>net7.0;net48</TargetFrameworks>
+    <TargetFrameworks>net8.0;net7.0;net48</TargetFrameworks>
     <AssemblyName>GhCopilot.Core</AssemblyName>
     <RootNamespace>GhCopilot.Core</RootNamespace>
     <Version>0.1.0</Version>
@@ -13,7 +13,7 @@
     <Reference Include="System.Net.Http" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TargetFramework)' == 'net7.0'">
+  <ItemGroup Condition="'$(TargetFramework)' == 'net7.0' Or '$(TargetFramework)' == 'net8.0'">
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 </Project>

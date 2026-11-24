@@ -88,16 +88,32 @@ namespace GhCopilot.Installer
         [STAThread]
         private static int Main(string[] args)
         {
+            string? companyEndpoint = ParseArgValue(args, "--company-endpoint");
+
             if (args.Any(a => string.Equals(a, "--install", StringComparison.OrdinalIgnoreCase)))
             {
                 try
                 {
-                    InstallCore(apiKey: null, modelId: null, sharedFolder: null, preferredRuntime: null);
+                    InstallCore(apiKey: null, modelId: null, sharedFolder: null, preferredRuntime: null, companyEndpointUrl: companyEndpoint);
                     return 0;
                 }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"Install failed: {ex.Message}");
+                    return 1;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(companyEndpoint))
+            {
+                try
+                {
+                    SaveCompanyDefaults(companyEndpoint!);
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to save company endpoint: {ex.Message}");
                     return 1;
                 }
             }
@@ -191,7 +207,8 @@ namespace GhCopilot.Installer
             string? apiKey,
             string? modelId,
             string? sharedFolder,
-            string? preferredRuntime)
+            string? preferredRuntime,
+            string? companyEndpointUrl = null)
         {
             string packageRoot = GetYakPackageRoot();
             string installDir = GetYakVersionDir();
@@ -287,8 +304,12 @@ namespace GhCopilot.Installer
                 }
             }
 
-            // Save optional pre-configuration (settings.json and DPAPI-encrypted API key).
+            // Save optional pre-configuration (settings.json, company-defaults.json, and DPAPI-encrypted API key).
             SaveOptionalConfiguration(apiKey, modelId, sharedFolder);
+            if (!string.IsNullOrWhiteSpace(companyEndpointUrl))
+            {
+                SaveCompanyDefaults(companyEndpointUrl!);
+            }
 
             return $"Installed GH Copilot v{Version} to:\r\n{installDir}\r\n\r\n" +
                    $"Registered Rhino 8 PlugIn:\r\n{rhpPath}\r\n\r\n" +
@@ -503,6 +524,48 @@ namespace GhCopilot.Installer
             {
                 // Ignore if ADS does not exist or filesystem does not support streams.
             }
+        }
+
+        private static string? ParseArgValue(string[] args, string flag)
+        {
+            for (int i = 0; i < args.Length; i++)
+            {
+                string arg = args[i] ?? string.Empty;
+                if (string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    string next = args[i + 1];
+                    if (!string.IsNullOrWhiteSpace(next) && !next.StartsWith("--", StringComparison.Ordinal))
+                    {
+                        return next.Trim();
+                    }
+                }
+                else if (arg.StartsWith(flag + "=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string val = arg.Substring(flag.Length + 1).Trim();
+                    if (!string.IsNullOrWhiteSpace(val))
+                    {
+                        return val;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        internal static void SaveCompanyDefaults(string companyEndpointUrl)
+        {
+            if (string.IsNullOrWhiteSpace(companyEndpointUrl))
+            {
+                return;
+            }
+
+            string settingsDir = GetSettingsDir();
+            Directory.CreateDirectory(settingsDir);
+            string defaultsPath = Path.Combine(settingsDir, "company-defaults.json");
+            string json = "{\n" +
+                          $"  \"companyEndpointUrl\": \"{EscapeJson(companyEndpointUrl.Trim())}\"\n" +
+                          "}\n";
+            File.WriteAllText(defaultsPath, json, Encoding.UTF8);
         }
 
         private static string EscapeJson(string value)

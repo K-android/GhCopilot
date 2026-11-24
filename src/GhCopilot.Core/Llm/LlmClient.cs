@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -13,9 +14,9 @@ namespace GhCopilot.Core.Llm
     /// Exception thrown when an LLM API call fails with an HTTP error, timeout, or malformed envelope.
     /// Guarantees the API key is scrubbed from any message.
     /// </summary>
-    public sealed class GeminiApiException : Exception
+    public sealed class LlmApiException : Exception
     {
-        public GeminiApiException(string message, HttpStatusCode? statusCode = null, bool isTransient = false, Exception? innerException = null)
+        public LlmApiException(string message, HttpStatusCode? statusCode = null, bool isTransient = false, Exception? innerException = null)
             : base(message, innerException)
         {
             StatusCode = statusCode;
@@ -27,11 +28,32 @@ namespace GhCopilot.Core.Llm
         public bool IsTransient { get; }
     }
 
+    public sealed class LlmUsage
+    {
+        public int PromptTokens { get; set; }
+        public int ResponseTokens { get; set; }
+        public long DurationMs { get; set; }
+        public string Provider { get; set; } = string.Empty;
+        public string ModelId { get; set; } = string.Empty;
+    }
+
+    public sealed class LlmCallResult
+    {
+        public LlmCallResult(string text, LlmUsage usage)
+        {
+            Text = text;
+            Usage = usage;
+        }
+
+        public string Text { get; }
+        public LlmUsage Usage { get; }
+    }
+
     /// <summary>
     /// Async HttpClient-based multi-provider BYOK client supporting Google Gemini (structured responseJsonSchema),
     /// Anthropic Claude, and OpenAI / OpenAI-compatible endpoints.
     /// </summary>
-    public sealed class GeminiClient : IDisposable
+    public sealed class LlmClient : IDisposable
     {
         public const string DefaultBaseUrl = "https://generativelanguage.googleapis.com/v1beta";
         public const string AnthropicBaseUrl = "https://api.anthropic.com/v1";
@@ -42,7 +64,7 @@ namespace GhCopilot.Core.Llm
         private readonly string _baseUrl;
 
 #if !NET5_0_OR_GREATER
-        static GeminiClient()
+        static LlmClient()
         {
             try
             {
@@ -55,12 +77,12 @@ namespace GhCopilot.Core.Llm
         }
 #endif
 
-        public GeminiClient()
+        public LlmClient()
             : this(null, DefaultBaseUrl)
         {
         }
 
-        public GeminiClient(HttpClient? httpClient, string baseUrl = DefaultBaseUrl)
+        public LlmClient(HttpClient? httpClient, string baseUrl = DefaultBaseUrl)
         {
             if (string.IsNullOrWhiteSpace(baseUrl))
             {
@@ -75,6 +97,8 @@ namespace GhCopilot.Core.Llm
             }
             _baseUrl = baseUrl.TrimEnd('/');
         }
+
+        public LlmUsage? LastCallUsage { get; private set; }
 
         public void Dispose()
         {
@@ -234,7 +258,7 @@ namespace GhCopilot.Core.Llm
             {
                 throw;
             }
-            catch (GeminiApiException ex)
+            catch (LlmApiException ex)
             {
                 return (false, $"Model check failed: {ex.Message}");
             }
@@ -259,8 +283,182 @@ namespace GhCopilot.Core.Llm
             string? customEndpointUrl = null,
             string? imageBase64Png = null)
         {
+            LlmCallResult result = await GenerateGraphJsonWithUsageAsync(
+                apiKey,
+                modelId,
+                systemInstruction,
+                userPrompt,
+                responseJsonSchema,
+                timeout,
+                cancellationToken,
+                provider,
+                customEndpointUrl,
+                imageBase64Png).ConfigureAwait(false);
+            return result.Text;
+        }
+
+        /// <summary>
+        /// Calls the configured LLM provider using structured JSON output and returns text plus token usage and duration.
+        /// </summary>
+        public async Task<LlmCallResult> GenerateGraphJsonWithUsageAsync(
+            string apiKey,
+            string modelId,
+            string systemInstruction,
+            string userPrompt,
+            JsonElement responseJsonSchema,
+            TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default,
+            string provider = "Gemini",
+            string? customEndpointUrl = null,
+            string? imageBase64Png = null)
+        {
             string cleanKey = SanitizeApiKey(apiKey);
             string normalizedProvider = NormalizeProvider(provider);
+            string normalizedModel = NormalizeModelId(modelId);
+            var stopwatch = Stopwatch.StartNew();
+
+            (string Text, int PromptTokens, int ResponseTokens) raw = await GenerateGraphJsonCoreAsync(
+                cleanKey,
+                modelId,
+                systemInstruction,
+                userPrompt,
+                responseJsonSchema,
+                timeout,
+                cancellationToken,
+                normalizedProvider,
+                customEndpointUrl,
+                imageBase64Png).ConfigureAwait(false);
+
+            stopwatch.Stop();
+            var usage = new LlmUsage
+            {
+                PromptTokens = raw.PromptTokens,
+                ResponseTokens = raw.ResponseTokens,
+                DurationMs = stopwatch.ElapsedMilliseconds,
+                Provider = normalizedProvider,
+                ModelId = normalizedModel
+            };
+            LastCallUsage = usage;
+            return new LlmCallResult(raw.Text, usage);
+        }
+
+        /// <summary>
+        /// Calls the configured LLM provider for plain-text or markdown explanations (with optional live viewport PNG).
+        /// </summary>
+        public async Task<string> GenerateTextAsync(
+            string apiKey,
+            string modelId,
+            string systemInstruction,
+            string userPrompt,
+            TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default,
+            string provider = "Gemini",
+            string? customEndpointUrl = null,
+            string? imageBase64Png = null)
+        {
+            LlmCallResult result = await GenerateTextWithUsageAsync(
+                apiKey,
+                modelId,
+                systemInstruction,
+                userPrompt,
+                timeout,
+                cancellationToken,
+                provider,
+                customEndpointUrl,
+                imageBase64Png).ConfigureAwait(false);
+            return result.Text;
+        }
+
+        /// <summary>
+        /// Calls the configured LLM provider for plain-text output and returns text plus token usage and duration.
+        /// </summary>
+        public async Task<LlmCallResult> GenerateTextWithUsageAsync(
+            string apiKey,
+            string modelId,
+            string systemInstruction,
+            string userPrompt,
+            TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default,
+            string provider = "Gemini",
+            string? customEndpointUrl = null,
+            string? imageBase64Png = null)
+        {
+            string cleanKey = SanitizeApiKey(apiKey);
+            string normalizedProvider = NormalizeProvider(provider);
+            string normalizedModel = NormalizeModelId(modelId);
+            var stopwatch = Stopwatch.StartNew();
+
+            (string Text, int PromptTokens, int ResponseTokens) raw;
+            if (normalizedProvider == "Anthropic")
+            {
+                raw = await SendAnthropicAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, stripCodeFences: false, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
+            }
+            else if (normalizedProvider == "OpenAI")
+            {
+                raw = await SendOpenAiAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, jsonMode: false, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
+            }
+            else
+            {
+                object generationConfig = new
+                {
+                    temperature = 0.2
+                };
+
+                try
+                {
+                    raw = await SendGeminiGenerateContentAsync(
+                        cleanKey,
+                        modelId,
+                        systemInstruction,
+                        userPrompt,
+                        generationConfig,
+                        stripCodeFences: false,
+                        timeout,
+                        customEndpointUrl,
+                        cancellationToken,
+                        imageBase64Png).ConfigureAwait(false);
+                }
+                catch (LlmApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png))
+                {
+                    raw = await SendGeminiGenerateContentAsync(
+                        cleanKey,
+                        modelId,
+                        systemInstruction,
+                        userPrompt,
+                        generationConfig,
+                        stripCodeFences: false,
+                        timeout,
+                        customEndpointUrl,
+                        cancellationToken,
+                        imageBase64Png: null).ConfigureAwait(false);
+                }
+            }
+
+            stopwatch.Stop();
+            var usage = new LlmUsage
+            {
+                PromptTokens = raw.PromptTokens,
+                ResponseTokens = raw.ResponseTokens,
+                DurationMs = stopwatch.ElapsedMilliseconds,
+                Provider = normalizedProvider,
+                ModelId = normalizedModel
+            };
+            LastCallUsage = usage;
+            return new LlmCallResult(raw.Text, usage);
+        }
+
+        private async Task<(string Text, int PromptTokens, int ResponseTokens)> GenerateGraphJsonCoreAsync(
+            string cleanKey,
+            string modelId,
+            string systemInstruction,
+            string userPrompt,
+            JsonElement responseJsonSchema,
+            TimeSpan? timeout,
+            CancellationToken cancellationToken,
+            string normalizedProvider,
+            string? customEndpointUrl,
+            string? imageBase64Png)
+        {
             if (normalizedProvider == "Anthropic")
             {
                 string augmentedSystem = $"{systemInstruction}\n\nReturn ONLY raw JSON strictly conforming to this JSON Schema (no markdown fences or prose):\n{responseJsonSchema.GetRawText()}";
@@ -294,10 +492,10 @@ namespace GhCopilot.Core.Llm
                     cancellationToken,
                     imageBase64Png).ConfigureAwait(false);
             }
-            catch (GeminiApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png) && !IsSchemaFieldError(ex.Message))
+            catch (LlmApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png) && !IsSchemaFieldError(ex.Message))
             {
                 // Fallback when the chosen model/endpoint does not accept image inputs: retry text-only.
-                return await GenerateGraphJsonAsync(
+                return await GenerateGraphJsonCoreAsync(
                     cleanKey,
                     modelId,
                     systemInstruction,
@@ -305,11 +503,11 @@ namespace GhCopilot.Core.Llm
                     responseJsonSchema,
                     timeout,
                     cancellationToken,
-                    provider,
+                    normalizedProvider,
                     customEndpointUrl,
                     imageBase64Png: null).ConfigureAwait(false);
             }
-            catch (GeminiApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && IsSchemaFieldError(ex.Message))
+            catch (LlmApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && IsSchemaFieldError(ex.Message))
             {
                 // Fallback for Gemini endpoints/models that reject responseJsonSchema or strict JSON Schema keywords:
                 // keep responseMimeType = application/json and enforce the schema in systemInstruction + local validator.
@@ -334,7 +532,7 @@ namespace GhCopilot.Core.Llm
                         cancellationToken,
                         imageBase64Png).ConfigureAwait(false);
                 }
-                catch (GeminiApiException imgEx) when (imgEx.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png))
+                catch (LlmApiException imgEx) when (imgEx.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png))
                 {
                     return await SendGeminiGenerateContentAsync(
                         cleanKey,
@@ -351,68 +549,7 @@ namespace GhCopilot.Core.Llm
             }
         }
 
-        /// <summary>
-        /// Calls the configured LLM provider for plain-text or markdown explanations (with optional live viewport PNG).
-        /// </summary>
-        public async Task<string> GenerateTextAsync(
-            string apiKey,
-            string modelId,
-            string systemInstruction,
-            string userPrompt,
-            TimeSpan? timeout = null,
-            CancellationToken cancellationToken = default,
-            string provider = "Gemini",
-            string? customEndpointUrl = null,
-            string? imageBase64Png = null)
-        {
-            string cleanKey = SanitizeApiKey(apiKey);
-            string normalizedProvider = NormalizeProvider(provider);
-            if (normalizedProvider == "Anthropic")
-            {
-                return await SendAnthropicAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, stripCodeFences: false, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
-            }
-
-            if (normalizedProvider == "OpenAI")
-            {
-                return await SendOpenAiAsync(cleanKey, modelId, systemInstruction, userPrompt, temperature: 0.2, jsonMode: false, timeout, customEndpointUrl, cancellationToken, imageBase64Png).ConfigureAwait(false);
-            }
-
-            object generationConfig = new
-            {
-                temperature = 0.2
-            };
-
-            try
-            {
-                return await SendGeminiGenerateContentAsync(
-                    cleanKey,
-                    modelId,
-                    systemInstruction,
-                    userPrompt,
-                    generationConfig,
-                    stripCodeFences: false,
-                    timeout,
-                    customEndpointUrl,
-                    cancellationToken,
-                    imageBase64Png).ConfigureAwait(false);
-            }
-            catch (GeminiApiException ex) when (ex.StatusCode == HttpStatusCode.BadRequest && !string.IsNullOrWhiteSpace(imageBase64Png))
-            {
-                return await SendGeminiGenerateContentAsync(
-                    cleanKey,
-                    modelId,
-                    systemInstruction,
-                    userPrompt,
-                    generationConfig,
-                    stripCodeFences: false,
-                    timeout,
-                    customEndpointUrl,
-                    cancellationToken,
-                    imageBase64Png: null).ConfigureAwait(false);
-            }
-        }
-
-        private async Task<string> SendGeminiGenerateContentAsync(
+        private async Task<(string Text, int PromptTokens, int ResponseTokens)> SendGeminiGenerateContentAsync(
             string apiKey,
             string modelId,
             string systemInstruction,
@@ -467,10 +604,10 @@ namespace GhCopilot.Core.Llm
             string responseBody = await SendAndReadBodyAsync(request, apiKey, effectiveTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
-            return ExtractGeminiCandidateText(responseBody, apiKey, stripCodeFences);
+            return ExtractGeminiCandidateTextAndUsage(responseBody, apiKey, stripCodeFences);
         }
 
-        private async Task<string> SendAnthropicAsync(
+        private async Task<(string Text, int PromptTokens, int ResponseTokens)> SendAnthropicAsync(
             string apiKey,
             string modelId,
             string systemInstruction,
@@ -522,10 +659,10 @@ namespace GhCopilot.Core.Llm
             string responseBody = await SendAndReadBodyAsync(request, apiKey, effectiveTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
-            return ExtractAnthropicText(responseBody, apiKey, stripCodeFences);
+            return ExtractAnthropicTextAndUsage(responseBody, apiKey, stripCodeFences);
         }
 
-        private async Task<string> SendOpenAiAsync(
+        private async Task<(string Text, int PromptTokens, int ResponseTokens)> SendOpenAiAsync(
             string apiKey,
             string modelId,
             string systemInstruction,
@@ -583,7 +720,7 @@ namespace GhCopilot.Core.Llm
             string responseBody = await SendAndReadBodyAsync(request, apiKey, effectiveTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
-            return ExtractOpenAiText(responseBody, apiKey, jsonMode);
+            return ExtractOpenAiTextAndUsage(responseBody, apiKey, jsonMode);
         }
 
         private static string SanitizeApiKey(string apiKey)
@@ -610,7 +747,7 @@ namespace GhCopilot.Core.Llm
             {
                 if (c < 0x21 || c > 0x7E)
                 {
-                    throw new GeminiApiException("API key contains invalid whitespace or non-ASCII characters. Re-copy the key without spaces or line breaks.");
+                    throw new LlmApiException("API key contains invalid whitespace or non-ASCII characters. Re-copy the key without spaces or line breaks.");
                 }
             }
 
@@ -698,7 +835,7 @@ namespace GhCopilot.Core.Llm
             }
         }
 
-        private static string NormalizeProvider(string? provider)
+        internal static string NormalizeProvider(string? provider)
         {
             if (string.IsNullOrWhiteSpace(provider))
             {
@@ -769,7 +906,7 @@ namespace GhCopilot.Core.Llm
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new GeminiApiException(
+                throw new LlmApiException(
                     $"LLM API request timed out after {timeout.TotalSeconds:F0}s.",
                     statusCode: null,
                     isTransient: true,
@@ -780,7 +917,7 @@ namespace GhCopilot.Core.Llm
                 string detail = ex.InnerException != null && !string.IsNullOrWhiteSpace(ex.InnerException.Message)
                     ? $"{ex.Message} ({ex.InnerException.Message})"
                     : ex.Message;
-                throw new GeminiApiException(
+                throw new LlmApiException(
                     $"LLM API network error: {ScrubSecret(detail, apiKey)}",
                     statusCode: null,
                     isTransient: true,
@@ -795,7 +932,7 @@ namespace GhCopilot.Core.Llm
                     int code = (int)response.StatusCode;
                     bool isTransient = code == 429 || code >= 500;
                     string safeSnippet = ScrubSecret(Truncate(body, 400), apiKey);
-                    throw new GeminiApiException(
+                    throw new LlmApiException(
                         $"LLM API returned HTTP {code} ({response.ReasonPhrase}): {safeSnippet}",
                         response.StatusCode,
                         isTransient);
@@ -843,13 +980,16 @@ namespace GhCopilot.Core.Llm
             }
             catch (JsonException ex)
             {
-                throw new GeminiApiException(
+                throw new LlmApiException(
                     $"LLM API returned invalid JSON envelope: {ScrubSecret(ex.Message, apiKey)}",
                     innerException: ex);
             }
         }
 
-        private static string ExtractGeminiCandidateText(string responseBody, string apiKey, bool stripCodeFences)
+        private static (string Text, int PromptTokens, int ResponseTokens) ExtractGeminiCandidateTextAndUsage(
+            string responseBody,
+            string apiKey,
+            bool stripCodeFences)
         {
             using JsonDocument doc = ParseJsonDocument(responseBody, apiKey);
 
@@ -857,7 +997,7 @@ namespace GhCopilot.Core.Llm
                 candidates.ValueKind != JsonValueKind.Array ||
                 candidates.GetArrayLength() == 0)
             {
-                throw new GeminiApiException("Gemini API response contained no candidates.");
+                throw new LlmApiException("Gemini API response contained no candidates.");
             }
 
             JsonElement firstCandidate = candidates[0];
@@ -865,7 +1005,7 @@ namespace GhCopilot.Core.Llm
                 !content.TryGetProperty("parts", out JsonElement parts) ||
                 parts.ValueKind != JsonValueKind.Array)
             {
-                throw new GeminiApiException("Gemini API candidate contained no content parts.");
+                throw new LlmApiException("Gemini API candidate contained no content parts.");
             }
 
             var sb = new StringBuilder();
@@ -884,10 +1024,30 @@ namespace GhCopilot.Core.Llm
                 }
             }
 
-            return FinalizeExtractedText(sb.ToString(), stripCodeFences, "Gemini");
+            int promptTokens = 0;
+            int responseTokens = 0;
+            if (doc.RootElement.TryGetProperty("usageMetadata", out JsonElement usageEl) &&
+                usageEl.ValueKind == JsonValueKind.Object)
+            {
+                promptTokens = ReadNonNegativeInt(usageEl, "promptTokenCount");
+                responseTokens = ReadNonNegativeInt(usageEl, "candidatesTokenCount");
+                if (responseTokens == 0)
+                {
+                    int totalTokens = ReadNonNegativeInt(usageEl, "totalTokenCount");
+                    if (totalTokens > promptTokens)
+                    {
+                        responseTokens = totalTokens - promptTokens;
+                    }
+                }
+            }
+
+            return (FinalizeExtractedText(sb.ToString(), stripCodeFences, "Gemini"), promptTokens, responseTokens);
         }
 
-        private static string ExtractAnthropicText(string responseBody, string apiKey, bool stripCodeFences)
+        private static (string Text, int PromptTokens, int ResponseTokens) ExtractAnthropicTextAndUsage(
+            string responseBody,
+            string apiKey,
+            bool stripCodeFences)
         {
             using JsonDocument doc = ParseJsonDocument(responseBody, apiKey);
 
@@ -895,7 +1055,7 @@ namespace GhCopilot.Core.Llm
                 content.ValueKind != JsonValueKind.Array ||
                 content.GetArrayLength() == 0)
             {
-                throw new GeminiApiException("Anthropic API response contained no content blocks.");
+                throw new LlmApiException("Anthropic API response contained no content blocks.");
             }
 
             var sb = new StringBuilder();
@@ -910,10 +1070,22 @@ namespace GhCopilot.Core.Llm
                 }
             }
 
-            return FinalizeExtractedText(sb.ToString(), stripCodeFences, "Anthropic");
+            int promptTokens = 0;
+            int responseTokens = 0;
+            if (doc.RootElement.TryGetProperty("usage", out JsonElement usageEl) &&
+                usageEl.ValueKind == JsonValueKind.Object)
+            {
+                promptTokens = ReadNonNegativeInt(usageEl, "input_tokens");
+                responseTokens = ReadNonNegativeInt(usageEl, "output_tokens");
+            }
+
+            return (FinalizeExtractedText(sb.ToString(), stripCodeFences, "Anthropic"), promptTokens, responseTokens);
         }
 
-        private static string ExtractOpenAiText(string responseBody, string apiKey, bool stripCodeFences)
+        private static (string Text, int PromptTokens, int ResponseTokens) ExtractOpenAiTextAndUsage(
+            string responseBody,
+            string apiKey,
+            bool stripCodeFences)
         {
             using JsonDocument doc = ParseJsonDocument(responseBody, apiKey);
 
@@ -921,7 +1093,7 @@ namespace GhCopilot.Core.Llm
                 choices.ValueKind != JsonValueKind.Array ||
                 choices.GetArrayLength() == 0)
             {
-                throw new GeminiApiException("OpenAI API response contained no choices.");
+                throw new LlmApiException("OpenAI API response contained no choices.");
             }
 
             JsonElement first = choices[0];
@@ -929,10 +1101,32 @@ namespace GhCopilot.Core.Llm
                 !msg.TryGetProperty("content", out JsonElement contentEl) ||
                 contentEl.ValueKind != JsonValueKind.String)
             {
-                throw new GeminiApiException("OpenAI API choice contained no message content.");
+                throw new LlmApiException("OpenAI API choice contained no message content.");
             }
 
-            return FinalizeExtractedText(contentEl.GetString() ?? string.Empty, stripCodeFences, "OpenAI");
+            int promptTokens = 0;
+            int responseTokens = 0;
+            if (doc.RootElement.TryGetProperty("usage", out JsonElement usageEl) &&
+                usageEl.ValueKind == JsonValueKind.Object)
+            {
+                promptTokens = ReadNonNegativeInt(usageEl, "prompt_tokens");
+                responseTokens = ReadNonNegativeInt(usageEl, "completion_tokens");
+            }
+
+            return (FinalizeExtractedText(contentEl.GetString() ?? string.Empty, stripCodeFences, "OpenAI"), promptTokens, responseTokens);
+        }
+
+        private static int ReadNonNegativeInt(JsonElement obj, string propertyName)
+        {
+            if (obj.TryGetProperty(propertyName, out JsonElement val) &&
+                val.ValueKind == JsonValueKind.Number &&
+                val.TryGetInt32(out int parsed) &&
+                parsed > 0)
+            {
+                return parsed;
+            }
+
+            return 0;
         }
 
         private static string FinalizeExtractedText(string raw, bool stripCodeFences, string providerLabel)
@@ -945,7 +1139,7 @@ namespace GhCopilot.Core.Llm
 
             if (string.IsNullOrWhiteSpace(text))
             {
-                throw new GeminiApiException($"{providerLabel} API returned empty response text.");
+                throw new LlmApiException($"{providerLabel} API returned empty response text.");
             }
 
             return text;

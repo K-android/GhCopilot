@@ -31,6 +31,10 @@ namespace GhCopilot.UI
         private readonly TextBox _sharedFolderBox;
         private readonly CheckBox _sendCanvasDataCheck;
         private readonly CheckBox _autoLayoutCheck;
+        private readonly CheckBox _autoVerifyViewportCheck;
+        private readonly CheckBox _forcePlanFirstCheck;
+        private readonly TextBox _retrievalSizeBox;
+        private readonly TextBox _maxNodesBox;
         private readonly TextArea _statusBox;
         private bool _updatingModelFromPicker;
 
@@ -93,7 +97,9 @@ namespace GhCopilot.UI
             _customEndpointBox = new TextBox
             {
                 Text = settings.CustomEndpointUrl,
-                PlaceholderText = "(Optional) Custom API base URL"
+                PlaceholderText = string.IsNullOrWhiteSpace(settings.CompanyEndpointUrl)
+                    ? "(Optional) Custom API base URL"
+                    : $"Company default: {settings.CompanyEndpointUrl}"
             };
             CopilotTheme.StyleTextBox(_customEndpointBox);
 
@@ -157,11 +163,49 @@ namespace GhCopilot.UI
             };
             CopilotTheme.StyleCheckBox(_sendCanvasDataCheck);
 
+            _autoVerifyViewportCheck = new CheckBox
+            {
+                Text = "Auto-verify viewport after build (sends image tokens)",
+                Checked = settings.AutoVerifyViewportAfterBuild
+            };
+            CopilotTheme.StyleCheckBox(_autoVerifyViewportCheck);
+
+            _forcePlanFirstCheck = new CheckBox
+            {
+                Text = "Always ask Plan First (never auto-skip)",
+                Checked = settings.ForcePlanFirstAlways
+            };
+            CopilotTheme.StyleCheckBox(_forcePlanFirstCheck);
+
+            _retrievalSizeBox = new TextBox
+            {
+                Text = settings.RetrievalMaxItems.ToString(),
+                PlaceholderText = AppSettings.DefaultRetrievalMaxItems.ToString(),
+                ToolTip = "Candidate items sent to the model per turn (10–140). Default is 90."
+            };
+            CopilotTheme.StyleTextBox(_retrievalSizeBox);
+
+            _maxNodesBox = new TextBox
+            {
+                Text = settings.MaxGraphNodes.ToString(),
+                PlaceholderText = AppSettings.DefaultMaxGraphNodes.ToString(),
+                ToolTip = "Maximum nodes allowed in a generated Grasshopper graph (10–500). Default is 200."
+            };
+            CopilotTheme.StyleTextBox(_maxNodesBox);
+
             var folderRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 4) };
             folderRow.BeginHorizontal();
             folderRow.Add(_sharedFolderBox, xscale: true);
             folderRow.Add(browseButton, xscale: false);
             folderRow.EndHorizontal();
+
+            var limitsRow = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(8, 4) };
+            limitsRow.BeginHorizontal();
+            limitsRow.Add(CopilotTheme.CreateLabel("Retrieval shortlist (10–140):", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()), xscale: false);
+            limitsRow.Add(_retrievalSizeBox, xscale: true);
+            limitsRow.Add(CopilotTheme.CreateLabel("Max nodes (10–500):", CopilotTheme.TextSecondary, CopilotTheme.SmallFont()), xscale: false);
+            limitsRow.Add(_maxNodesBox, xscale: true);
+            limitsRow.EndHorizontal();
 
             var canvasCardLayout = new DynamicLayout { Padding = Padding.Empty, Spacing = new Size(6, 6) };
             canvasCardLayout.BeginVertical();
@@ -170,6 +214,9 @@ namespace GhCopilot.UI
             canvasCardLayout.Add(folderRow);
             canvasCardLayout.Add(_autoLayoutCheck);
             canvasCardLayout.Add(_sendCanvasDataCheck);
+            canvasCardLayout.Add(_autoVerifyViewportCheck);
+            canvasCardLayout.Add(_forcePlanFirstCheck);
+            canvasCardLayout.Add(limitsRow);
             canvasCardLayout.EndVertical();
             Panel canvasCard = CopilotTheme.CreateCard(canvasCardLayout, CopilotTheme.BorderSubtle, CopilotTheme.Surface, padding: 10);
 
@@ -413,6 +460,25 @@ namespace GhCopilot.UI
                 settings.SharedLibraryFolder = _sharedFolderBox.Text?.Trim() ?? string.Empty;
                 settings.SendCanvasData = _sendCanvasDataCheck.Checked == true;
                 settings.AutoLayout = _autoLayoutCheck.Checked != false;
+                settings.AutoVerifyViewportAfterBuild = _autoVerifyViewportCheck.Checked == true;
+                settings.ForcePlanFirstAlways = _forcePlanFirstCheck.Checked == true;
+
+                int retrievalSize = settings.RetrievalMaxItems;
+                if (int.TryParse(_retrievalSizeBox.Text?.Trim(), out int parsedRetrieval))
+                {
+                    retrievalSize = Math.Max(AppSettings.MinRetrievalMaxItems, Math.Min(AppSettings.MaxRetrievalMaxItems, parsedRetrieval));
+                }
+                settings.RetrievalMaxItems = retrievalSize;
+                _retrievalSizeBox.Text = retrievalSize.ToString();
+
+                int maxNodes = settings.MaxGraphNodes;
+                if (int.TryParse(_maxNodesBox.Text?.Trim(), out int parsedMaxNodes))
+                {
+                    maxNodes = Math.Max(AppSettings.MinMaxGraphNodes, Math.Min(AppSettings.MaxMaxGraphNodes, parsedMaxNodes));
+                }
+                settings.MaxGraphNodes = maxNodes;
+                _maxNodesBox.Text = maxNodes.ToString();
+
                 settings.Save();
 
                 string enteredKey = GetEnteredApiKey();
@@ -467,7 +533,7 @@ namespace GhCopilot.UI
             SetConsoleStatus($"Testing {provider} model '{modelId}' using {sourceLabel}...", CopilotTheme.AccentCyan);
             try
             {
-                using var client = new GeminiClient();
+                using var client = new LlmClient();
                 (bool isAvailable, string message) = await client
                     .VerifyConfiguredModelAsync(apiKey, modelId, default, provider, endpoint)
                     .ConfigureAwait(false);
@@ -479,7 +545,7 @@ namespace GhCopilot.UI
             }
             catch (Exception ex)
             {
-                string safe = GeminiClient.ScrubSecret(ex.Message, apiKey);
+                string safe = LlmClient.ScrubSecret(ex.Message, apiKey);
                 Application.Instance?.AsyncInvoke(() =>
                 {
                     SetConsoleStatus($"Verification error: {safe}", CopilotTheme.DangerRose);
@@ -507,7 +573,7 @@ namespace GhCopilot.UI
             SetConsoleStatus($"Fetching available {provider} models using {sourceLabel}...", CopilotTheme.AccentCyan);
             try
             {
-                using var client = new GeminiClient();
+                using var client = new LlmClient();
                 IReadOnlyList<string> models = await client
                     .ListAvailableModelsAsync(apiKey, provider, endpoint)
                     .ConfigureAwait(false);
@@ -568,7 +634,7 @@ namespace GhCopilot.UI
             }
             catch (Exception ex)
             {
-                string safe = GeminiClient.ScrubSecret(ex.Message, apiKey);
+                string safe = LlmClient.ScrubSecret(ex.Message, apiKey);
                 Application.Instance?.AsyncInvoke(() =>
                 {
                     SetConsoleStatus($"Fetch models failed: {safe}", CopilotTheme.DangerRose);

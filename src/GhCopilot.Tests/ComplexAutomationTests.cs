@@ -272,7 +272,7 @@ namespace GhCopilot.Tests
             });
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http);
+            using var client = new LlmClient(http);
             JsonElement schema = SchemaBuilder.BuildResponseJsonSchema(CreateShortlist());
 
             string claudeJson = await client.GenerateGraphJsonAsync(
@@ -342,7 +342,7 @@ namespace GhCopilot.Tests
                 });
 
                 using var http = new HttpClient(handler);
-                using var client = new GeminiClient(http);
+                using var client = new LlmClient(http);
 
                 var selectedContext = new CanvasSnapshot
                 {

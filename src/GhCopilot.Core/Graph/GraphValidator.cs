@@ -69,7 +69,8 @@ namespace GhCopilot.Core.Graph
         public static ValidationResult Validate(
             GraphSpec spec,
             IReadOnlyDictionary<string, ComponentRecord> shortlist,
-            IReadOnlyDictionary<string, ComponentRecord>? externalNodes = null)
+            IReadOnlyDictionary<string, ComponentRecord>? externalNodes = null,
+            int maxNodeCount = MaxNodeCount)
         {
             if (spec is null)
             {
@@ -81,6 +82,7 @@ namespace GhCopilot.Core.Graph
                 throw new ArgumentNullException(nameof(shortlist));
             }
 
+            int effectiveMaxNodes = maxNodeCount < 1 ? 1 : maxNodeCount;
             var result = new ValidationResult();
             bool hasScript = spec.Script != null;
 
@@ -97,11 +99,11 @@ namespace GhCopilot.Core.Graph
                 ValidateScript(spec.Script!, result);
             }
 
-            if (spec.Nodes.Count > MaxNodeCount)
+            if (spec.Nodes.Count > effectiveMaxNodes)
             {
                 result.Errors.Add(new ValidationIssue(
                     ValidationErrorCode.TooManyNodes,
-                    $"GraphSpec has {spec.Nodes.Count} nodes, exceeding limit of {MaxNodeCount}."));
+                    $"GraphSpec has {spec.Nodes.Count} nodes, exceeding limit of {effectiveMaxNodes}."));
             }
 
             var nodesById = new Dictionary<string, NodeSpec>(StringComparer.Ordinal);

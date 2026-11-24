@@ -200,7 +200,7 @@ namespace GhCopilot.Tests
                 });
 
                 using var http = new HttpClient(handler);
-                using var client = new GeminiClient(http);
+                using var client = new LlmClient(http);
 
                 RepairLoopResult result = await RepairLoop.GenerateAndValidateAsync(
                     client,

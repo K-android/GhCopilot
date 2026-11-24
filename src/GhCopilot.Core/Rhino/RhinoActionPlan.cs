@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using GhCopilot.Core.Host;
 
 namespace GhCopilot.Core.Rhino
 {
@@ -10,13 +11,48 @@ namespace GhCopilot.Core.Rhino
     /// Structured direct Rhino 8 scene-manipulation plan returned by an LLM when working
     /// directly in the Rhino viewport without Grasshopper.
     /// </summary>
-    public sealed class RhinoActionPlan
+    public sealed class RhinoActionPlan : IActionPlan
     {
+        private static readonly HashSet<string> ReadOnlyOps = new HashSet<string>(
+            new[] { "select", "zoom", "set_view", "set_camera", "set_display_mode" },
+            StringComparer.OrdinalIgnoreCase);
+
         [JsonPropertyName("ops")]
         public List<RhinoActionOp> Ops { get; set; } = new List<RhinoActionOp>();
 
         [JsonPropertyName("explanation")]
         public string Explanation { get; set; } = string.Empty;
+
+        [JsonIgnore]
+        public int OperationCount => Ops?.Count ?? 0;
+
+        [JsonIgnore]
+        public bool HasWriteOperations
+        {
+            get
+            {
+                if (Ops is null || Ops.Count == 0)
+                {
+                    return false;
+                }
+
+                foreach (RhinoActionOp op in Ops)
+                {
+                    if (op is null)
+                    {
+                        continue;
+                    }
+
+                    string name = (op.Op ?? string.Empty).Trim();
+                    if (!string.IsNullOrEmpty(name) && !ReadOnlyOps.Contains(name))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
     }
 
     /// <summary>
@@ -195,6 +231,13 @@ namespace GhCopilot.Core.Rhino
     {
         public bool IsValid => Errors.Count == 0;
         public List<string> Errors { get; } = new List<string>();
+
+        public ActionPlanValidationResult ToHostResult()
+        {
+            var hostResult = new ActionPlanValidationResult();
+            hostResult.Errors.AddRange(Errors);
+            return hostResult;
+        }
     }
 
     /// <summary>

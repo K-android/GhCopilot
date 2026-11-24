@@ -3,7 +3,6 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using GhCopilot.Core.Index;
 
 namespace GhCopilot.Core.Settings
 {
@@ -15,11 +14,23 @@ namespace GhCopilot.Core.Settings
         [JsonPropertyName("action")]
         public string Action { get; set; } = string.Empty;
 
+        [JsonPropertyName("provider")]
+        public string Provider { get; set; } = string.Empty;
+
         [JsonPropertyName("modelId")]
         public string ModelId { get; set; } = string.Empty;
 
         [JsonPropertyName("sendCanvasDataEnabled")]
         public bool SendCanvasDataEnabled { get; set; }
+
+        [JsonPropertyName("promptTokens")]
+        public int PromptTokens { get; set; }
+
+        [JsonPropertyName("responseTokens")]
+        public int ResponseTokens { get; set; }
+
+        [JsonPropertyName("durationMs")]
+        public long DurationMs { get; set; }
 
         [JsonPropertyName("systemInstruction")]
         public string SystemInstruction { get; set; } = string.Empty;
@@ -29,7 +40,8 @@ namespace GhCopilot.Core.Settings
     }
 
     /// <summary>
-    /// Writes a local audit log of every outbound prompt payload sent to Gemini so IT/users can verify data privacy.
+    /// Writes a local audit log of every outbound prompt payload and per-turn token/duration metrics
+    /// so IT/users can verify data privacy and metering.
     /// </summary>
     public static class PayloadAuditLogger
     {
@@ -37,7 +49,7 @@ namespace GhCopilot.Core.Settings
 
         public static string GetDefaultAuditLogPath()
         {
-            return Path.Combine(IndexStore.GetDefaultDataDirectory(), "sent-payloads.jsonl");
+            return SharedCopilotPaths.GetAuditLogPath();
         }
 
         public static void LogSentPayload(
@@ -48,6 +60,46 @@ namespace GhCopilot.Core.Settings
             string promptText,
             string? filePath = null)
         {
+            WriteEntry(new PayloadAuditEntry
+            {
+                TimestampUtc = DateTime.UtcNow,
+                Action = action,
+                ModelId = modelId,
+                SendCanvasDataEnabled = sendCanvasDataEnabled,
+                SystemInstruction = systemInstruction,
+                PromptText = promptText
+            }, filePath);
+        }
+
+        public static void LogTurnCompletion(
+            string action,
+            string provider,
+            string modelId,
+            bool sendCanvasDataEnabled,
+            string systemInstruction,
+            string promptText,
+            int promptTokens,
+            int responseTokens,
+            long durationMs,
+            string? filePath = null)
+        {
+            WriteEntry(new PayloadAuditEntry
+            {
+                TimestampUtc = DateTime.UtcNow,
+                Action = action,
+                Provider = provider ?? string.Empty,
+                ModelId = modelId ?? string.Empty,
+                SendCanvasDataEnabled = sendCanvasDataEnabled,
+                PromptTokens = Math.Max(0, promptTokens),
+                ResponseTokens = Math.Max(0, responseTokens),
+                DurationMs = Math.Max(0, durationMs),
+                SystemInstruction = systemInstruction ?? string.Empty,
+                PromptText = promptText ?? string.Empty
+            }, filePath);
+        }
+
+        private static void WriteEntry(PayloadAuditEntry entry, string? filePath)
+        {
             string targetPath = string.IsNullOrWhiteSpace(filePath) ? GetDefaultAuditLogPath() : filePath!;
 
             try
@@ -57,16 +109,6 @@ namespace GhCopilot.Core.Settings
                 {
                     Directory.CreateDirectory(dir);
                 }
-
-                var entry = new PayloadAuditEntry
-                {
-                    TimestampUtc = DateTime.UtcNow,
-                    Action = action,
-                    ModelId = modelId,
-                    SendCanvasDataEnabled = sendCanvasDataEnabled,
-                    SystemInstruction = systemInstruction,
-                    PromptText = promptText
-                };
 
                 string line = JsonSerializer.Serialize(entry) + Environment.NewLine;
                 lock (WriteLock)

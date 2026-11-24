@@ -2,6 +2,8 @@ using System;
 using System.Drawing;
 using GhCopilot.Core;
 using GhCopilot.Core.Host;
+using GhCopilot.Core.Settings;
+using GhCopilot.Rhino.Host;
 using GhCopilot.Rhino.UI;
 using Rhino.PlugIns;
 using Rhino.UI;
@@ -9,10 +11,12 @@ using Rhino.UI;
 namespace GhCopilot.Rhino
 {
     /// <summary>
-    /// Rhino 8 PlugIn host for GH Copilot. Registers the dockable Eto panel and Rhino commands.
+    /// Rhino 8 PlugIn host for GH Copilot. Registers the dockable Eto panel, commands, and optional headless pipe bridge.
     /// </summary>
     public sealed class GhCopilotRhinoPlugIn : PlugIn
     {
+        private HeadlessBridgeServer? _headlessServer;
+
         public GhCopilotRhinoPlugIn()
         {
             Instance = this;
@@ -40,6 +44,19 @@ namespace GhCopilot.Rhino
                     StartupDiagnostics.Write("Rhino direct bridge initialization warning (panel will still register).", bridgeEx);
                 }
 
+                try
+                {
+                    if (AppSettings.Load().EnableHeadlessBridge)
+                    {
+                        _headlessServer = new HeadlessBridgeServer();
+                        _headlessServer.Start();
+                    }
+                }
+                catch (Exception headlessEx)
+                {
+                    StartupDiagnostics.Write("Headless bridge initialization warning (panel will still register).", headlessEx);
+                }
+
                 Panels.RegisterPanel(
                     this,
                     typeof(CopilotDockPanel),
@@ -55,6 +72,21 @@ namespace GhCopilot.Rhino
                     + Environment.NewLine + "Details: " + StartupDiagnostics.LogPath;
                 return LoadReturnCode.ErrorShowDialog;
             }
+        }
+
+        protected override void OnShutdown()
+        {
+            try
+            {
+                _headlessServer?.Dispose();
+                _headlessServer = null;
+            }
+            catch (Exception)
+            {
+                // Ignore shutdown cleanup errors.
+            }
+
+            base.OnShutdown();
         }
     }
 }

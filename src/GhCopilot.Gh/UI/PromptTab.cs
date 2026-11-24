@@ -805,11 +805,16 @@ namespace GhCopilot.UI
         {
             IChatHostBridge? chat = bridge as IChatHostBridge;
             ChatSession session = CopilotHostRegistry.SharedSession;
+            AppSettings settings = AppSettings.Load();
             bool isQuickTurn = action == ChatAction.ExplainSelection ||
                                action == ChatAction.SaveRecipe ||
                                (action == ChatAction.Message && !useRhinoSelection &&
                                 (ChatPromptBuilder.IsConversationalOnlyPrompt(prompt) ||
-                                 ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, session, _planFirstCheck.Checked != false)));
+                                 ChatPromptBuilder.ShouldPlanBeforeBuilding(
+                                     prompt,
+                                     session,
+                                     _planFirstCheck.Checked != false,
+                                     forcePlanFirstAlways: settings.ForcePlanFirstAlways)));
             string userBubble = (action == ChatAction.Message ? string.Empty : "[" + action + "] ")
                 + prompt + (useRhinoSelection ? " [Use Rhino Selection]" : string.Empty);
 
@@ -862,9 +867,15 @@ namespace GhCopilot.UI
             CopilotWorkMode targetMode = CopilotWorkMode.RhinoDirect)
         {
             ChatSession session = CopilotHostRegistry.SharedSession;
+            AppSettings settings = AppSettings.Load();
             bool isQuickTurn = explainOnly ||
                                ChatPromptBuilder.IsConversationalOnlyPrompt(prompt) ||
-                               ChatPromptBuilder.ShouldPlanBeforeBuilding(prompt, session, _planFirstCheck.Checked != false);
+                               ChatPromptBuilder.ShouldPlanBeforeBuilding(
+                                   prompt,
+                                   session,
+                                   _planFirstCheck.Checked != false,
+                                   forcePlanFirstAlways: settings.ForcePlanFirstAlways,
+                                   isSingleDirectRhinoOp: ChatPromptBuilder.IsSimpleSingleRhinoOpPrompt(prompt));
             string displayPrompt = explainOnly
                 ? (string.IsNullOrWhiteSpace(prompt) ? "Verify & explain my live Rhino viewport" : "[Explain Rhino] " + prompt)
                 : prompt;
@@ -981,8 +992,18 @@ namespace GhCopilot.UI
                             foreach (string warning in response.ValidatorWarnings) combinedMessages.Add("[Validator] " + warning);
                             combinedMessages.AddRange(response.RuntimeMessages);
                             UpdateDiagnosticsDisplay(combinedMessages);
-                            if (supportsTokens) ShowTokenEstimate(response.EstimatedInputTokens);
-                            else _tokenEstimateLabel.Text = "n/a";
+                            if (response.PromptTokens > 0 || response.ResponseTokens > 0)
+                            {
+                                ShowActualTokens(response.PromptTokens, response.ResponseTokens, response.ModelId, response.DurationMs);
+                            }
+                            else if (supportsTokens)
+                            {
+                                ShowTokenEstimate(response.EstimatedInputTokens);
+                            }
+                            else
+                            {
+                                _tokenEstimateLabel.Text = "n/a";
+                            }
                             if (response.IsSuccess && clearPromptOnSuccess)
                             {
                                 _promptBox.Text = string.Empty;
@@ -1218,6 +1239,14 @@ namespace GhCopilot.UI
         private void ShowTokenEstimate(int estimate)
         {
             _tokenEstimateLabel.Text = $"~{Math.Max(0, estimate):N0} tok";
+            _tokenEstimateLabel.ToolTip = "Approximate input token estimate";
+        }
+
+        private void ShowActualTokens(int promptTokens, int responseTokens, string? modelId, long durationMs)
+        {
+            _tokenEstimateLabel.Text = $"{Math.Max(0, promptTokens):N0} in / {Math.Max(0, responseTokens):N0} out";
+            string modelText = string.IsNullOrWhiteSpace(modelId) ? "model" : modelId!;
+            _tokenEstimateLabel.ToolTip = $"Actual provider tokens ({modelText}, {durationMs} ms)";
         }
 
         private void UpdateActionState()

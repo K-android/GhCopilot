@@ -369,7 +369,7 @@ namespace GhCopilot.Tests
             });
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http);
+            using var client = new LlmClient(http);
             string reply = await client.GenerateTextAsync(
                 "AIzaSy-TestKey-1234",
                 "gemini-2.5-flash",

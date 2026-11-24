@@ -129,7 +129,7 @@ namespace GhCopilot.Tests
             });
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http);
+            using var client = new LlmClient(http);
 
             (bool available, string okMsg) = await client.VerifyConfiguredModelAsync("secret-test-key", "gemini-3.6-flash");
             Assert.True(available);
@@ -161,7 +161,7 @@ namespace GhCopilot.Tests
             });
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http);
+            using var client = new LlmClient(http);
 
             JsonElement schema = SchemaBuilder.BuildResponseJsonSchema(CreateShortlist());
             string result = await client.GenerateGraphJsonAsync(
@@ -207,7 +207,7 @@ namespace GhCopilot.Tests
                 }));
 
                 using var http = new HttpClient(handler);
-                using var client = new GeminiClient(http);
+                using var client = new LlmClient(http);
 
                 RepairLoopResult result = await RepairLoop.GenerateAndValidateAsync(
                     client,
@@ -267,7 +267,7 @@ namespace GhCopilot.Tests
                 });
 
                 using var http = new HttpClient(handler);
-                using var client = new GeminiClient(http);
+                using var client = new LlmClient(http);
 
                 RepairLoopResult result = await RepairLoop.GenerateAndValidateAsync(
                     client,
@@ -324,7 +324,7 @@ namespace GhCopilot.Tests
                 });
 
                 using var http = new HttpClient(handler);
-                using var client = new GeminiClient(http);
+                using var client = new LlmClient(http);
 
                 RepairLoopResult result = await RepairLoop.GenerateAndValidateAsync(
                     client,
@@ -360,10 +360,10 @@ namespace GhCopilot.Tests
             }));
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http);
+            using var client = new LlmClient(http);
             JsonElement schema = SchemaBuilder.BuildResponseJsonSchema(CreateShortlist());
 
-            GeminiApiException ex = await Assert.ThrowsAsync<GeminiApiException>(() =>
+            LlmApiException ex = await Assert.ThrowsAsync<LlmApiException>(() =>
                 client.GenerateGraphJsonAsync(secretKey, "gemini-3.6-flash", "sys", "user", schema));
 
             Assert.Equal(statusCode, ex.StatusCode);
@@ -399,7 +399,7 @@ namespace GhCopilot.Tests
                 }));
 
                 using var http = new HttpClient(handler);
-                using var client = new GeminiClient(http);
+                using var client = new LlmClient(http);
 
                 var currentSpec = new GraphSpec
                 {
@@ -558,7 +558,7 @@ namespace GhCopilot.Tests
             });
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http, "https://example.test/v1beta");
+            using var client = new LlmClient(http, "https://example.test/v1beta");
             JsonElement schema = SchemaBuilder.BuildResponseJsonSchema(new[] { new ComponentRecord { ShortId = "c001", Name = "Circle" } });
 
             string result = await client.GenerateGraphJsonAsync("\"quoted-key\r\n\"", "gemini-2.5-flash", "sys", "usr", schema);
@@ -584,7 +584,7 @@ namespace GhCopilot.Tests
             });
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http, "https://default.test/v1beta");
+            using var client = new LlmClient(http, "https://default.test/v1beta");
 
             (bool ok, string msg) = await client.VerifyConfiguredModelAsync("test-key", "gemini-nonexistent", default, "Gemini", "https://custom.test/v1beta");
 
@@ -597,7 +597,7 @@ namespace GhCopilot.Tests
         [Fact]
         public async Task VerifyConfiguredModelAsync_RejectsInvalidKeyCharactersGracefully()
         {
-            using var client = new GeminiClient();
+            using var client = new LlmClient();
             (bool ok, string msg) = await client.VerifyConfiguredModelAsync("bad key with spaces", "gemini-2.5-flash");
             Assert.False(ok);
             Assert.Contains("invalid whitespace", msg, StringComparison.OrdinalIgnoreCase);

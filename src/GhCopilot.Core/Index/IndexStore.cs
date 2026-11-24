@@ -131,8 +131,7 @@ namespace GhCopilot.Core.Index
 
         public static string GetDefaultDataDirectory()
         {
-            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            return Path.Combine(localAppData, "GhCopilot");
+            return GhCopilot.Core.Settings.SharedCopilotPaths.GetSharedDirectory();
         }
 
         public static string GetDefaultCacheFilePath()

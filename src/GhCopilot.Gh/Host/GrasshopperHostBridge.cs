@@ -21,11 +21,11 @@ namespace GhCopilot.Gh.Host
     /// Exposes live Grasshopper host state, preview actions, index management, recipes,
     /// multi-provider BYOK generation, and canvas awareness.
     /// </summary>
-    public sealed partial class GrasshopperHostBridge : IGrasshopperHostBridge, IChatHostBridge
+    public sealed partial class GrasshopperHostBridge : IGrasshopperHostBridge, IChatHostBridge, IHeadlessChatBridge
     {
         private readonly object _previewLock = new object();
         private readonly object _indexLock = new object();
-        private readonly GeminiClient _geminiClient = new GeminiClient();
+        private readonly LlmClient _llmClient = new LlmClient();
         private GroupPreview? _activePreview;
         private IndexStore? _indexStore;
         private int _lastIndexedProxyCount = -1;
@@ -187,8 +187,8 @@ namespace GhCopilot.Gh.Host
                 return $"Model check skipped: no API key saved (or {SecretStore.EnvVarName} not set).";
             }
 
-            string? endpoint = string.IsNullOrWhiteSpace(settings.CustomEndpointUrl) ? null : settings.CustomEndpointUrl;
-            (_, string message) = await _geminiClient
+            string? endpoint = settings.GetEffectiveEndpointUrl();
+            (_, string message) = await _llmClient
                 .VerifyConfiguredModelAsync(apiKey!, settings.ModelId, cancellationToken, settings.Provider, endpoint)
                 .ConfigureAwait(false);
 
@@ -377,10 +377,11 @@ namespace GhCopilot.Gh.Host
         private static IReadOnlyList<ComponentRecord> BuildShortlistForFix(
             IndexStore store,
             CanvasSnapshot snapshot,
-            string? userHint)
+            string? userHint,
+            int maxShortlistSize = AppSettings.DefaultRetrievalMaxItems)
         {
-            const int maxShortlistSize = 100;
-            var result = new List<ComponentRecord>(maxShortlistSize);
+            int limit = Math.Max(AppSettings.MinRetrievalMaxItems, Math.Min(AppSettings.MaxRetrievalMaxItems, maxShortlistSize));
+            var result = new List<ComponentRecord>(limit);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (CanvasNodeSnapshot node in snapshot.Nodes)
@@ -402,9 +403,9 @@ namespace GhCopilot.Gh.Host
                 string.Join(" ", snapshot.Nodes.SelectMany(n => n.RuntimeMessages.Select(m => m.Message)))
             });
 
-            foreach (ComponentRecord candidate in Retriever.Retrieve(store.AllComponents, retrievalQuery, maxShortlistSize))
+            foreach (ComponentRecord candidate in Retriever.Retrieve(store.AllComponents, retrievalQuery, limit))
             {
-                if (result.Count >= maxShortlistSize)
+                if (result.Count >= limit)
                 {
                     break;
                 }

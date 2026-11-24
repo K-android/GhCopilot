@@ -88,7 +88,7 @@ namespace GhCopilot.Core.Llm
         }
 
         public static Task<RepairLoopResult> GenerateAndValidateAsync(
-            GeminiClient client,
+            LlmClient client,
             string apiKey,
             string modelId,
             string userPrompt,
@@ -102,7 +102,8 @@ namespace GhCopilot.Core.Llm
             string? customEndpointUrl = null,
             IReadOnlyList<RecipeRecord>? matchingRecipes = null,
             CanvasSnapshot? selectedContext = null,
-            bool autoLayout = true)
+            bool autoLayout = true,
+            int maxNodeCount = GraphValidator.MaxNodeCount)
         {
             if (shortlist is null) throw new ArgumentNullException(nameof(shortlist));
 
@@ -121,6 +122,7 @@ namespace GhCopilot.Core.Llm
                 shortlist,
                 externalNodes,
                 autoLayout,
+                maxNodeCount,
                 sendCanvasDataEnabled,
                 logFilePath,
                 auditLogPath,
@@ -129,7 +131,7 @@ namespace GhCopilot.Core.Llm
         }
 
         public static Task<RepairLoopResult> FixSelectionAndValidateAsync(
-            GeminiClient client,
+            LlmClient client,
             string apiKey,
             string modelId,
             CanvasSnapshot snapshot,
@@ -142,7 +144,8 @@ namespace GhCopilot.Core.Llm
             CancellationToken cancellationToken = default,
             string provider = "Gemini",
             string? customEndpointUrl = null,
-            bool autoLayout = true)
+            bool autoLayout = true,
+            int maxNodeCount = GraphValidator.MaxNodeCount)
         {
             if (snapshot is null) throw new ArgumentNullException(nameof(snapshot));
             if (shortlist is null) throw new ArgumentNullException(nameof(shortlist));
@@ -169,6 +172,7 @@ namespace GhCopilot.Core.Llm
                 shortlist,
                 externalNodes: null,
                 autoLayout,
+                maxNodeCount,
                 includeNonSelectedContext,
                 logFilePath,
                 auditLogPath,
@@ -180,7 +184,7 @@ namespace GhCopilot.Core.Llm
         /// Performs one bounded auto-fix pass when post-solve Grasshopper RuntimeMessages contain errors or warnings.
         /// </summary>
         public static async Task<RepairLoopResult> RepairRuntimeMessagesAsync(
-            GeminiClient client,
+            LlmClient client,
             string apiKey,
             string modelId,
             string userPrompt,
@@ -195,7 +199,8 @@ namespace GhCopilot.Core.Llm
             string provider = "Gemini",
             string? customEndpointUrl = null,
             CanvasSnapshot? selectedContext = null,
-            bool autoLayout = true)
+            bool autoLayout = true,
+            int maxNodeCount = GraphValidator.MaxNodeCount)
         {
             if (client is null) throw new ArgumentNullException(nameof(client));
             if (shortlist is null) throw new ArgumentNullException(nameof(shortlist));
@@ -207,18 +212,11 @@ namespace GhCopilot.Core.Llm
             string systemInstruction = PromptBuilder.BuildSystemInstruction();
             string prompt = PromptBuilder.BuildRuntimeRepairPrompt(userPrompt, shortlist, currentSpec, runtimeMessages);
 
-            PayloadAuditLogger.LogSentPayload(
-                "RuntimeRepair",
-                $"{provider}:{modelId}",
-                sendCanvasDataEnabled,
-                systemInstruction,
-                prompt,
-                auditLogPath);
-
             string rawResponse = string.Empty;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                rawResponse = await client.GenerateGraphJsonAsync(
+                LlmCallResult callResult = await client.GenerateGraphJsonWithUsageAsync(
                     apiKey,
                     modelId,
                     systemInstruction,
@@ -228,9 +226,34 @@ namespace GhCopilot.Core.Llm
                     cancellationToken,
                     provider,
                     customEndpointUrl).ConfigureAwait(false);
+                rawResponse = callResult.Text;
+
+                PayloadAuditLogger.LogTurnCompletion(
+                    "RuntimeRepair",
+                    callResult.Usage.Provider,
+                    modelId,
+                    sendCanvasDataEnabled,
+                    systemInstruction,
+                    prompt,
+                    callResult.Usage.PromptTokens,
+                    callResult.Usage.ResponseTokens,
+                    callResult.Usage.DurationMs,
+                    auditLogPath);
             }
-            catch (GeminiApiException ex)
+            catch (LlmApiException ex)
             {
+                sw.Stop();
+                PayloadAuditLogger.LogTurnCompletion(
+                    "RuntimeRepair",
+                    provider,
+                    modelId,
+                    sendCanvasDataEnabled,
+                    systemInstruction,
+                    prompt,
+                    0,
+                    0,
+                    sw.ElapsedMilliseconds,
+                    auditLogPath);
                 var errors = new List<string> { ex.Message };
                 AppendRunLog(logFilePath, modelId, userPrompt, shortlist, rawResponse, false, 1, errors, "RuntimeRepairApiError");
                 return new RepairLoopResult(false, null, null, 1, errors, rawResponse);
@@ -243,7 +266,7 @@ namespace GhCopilot.Core.Llm
                 return new RepairLoopResult(false, null, null, 1, errors, rawResponse);
             }
 
-            ValidationResult validation = GraphValidator.Validate(spec!, shortlistById, externalNodes);
+            ValidationResult validation = GraphValidator.Validate(spec!, shortlistById, externalNodes, maxNodeCount);
             if (!validation.IsValid)
             {
                 List<string> errors = validation.Errors.Select(e => e.ToString()).ToList();
@@ -261,7 +284,7 @@ namespace GhCopilot.Core.Llm
         }
 
         private static async Task<RepairLoopResult> RunBoundedValidationLoopAsync(
-            GeminiClient client,
+            LlmClient client,
             string apiKey,
             string modelId,
             string provider,
@@ -272,6 +295,7 @@ namespace GhCopilot.Core.Llm
             IReadOnlyList<ComponentRecord> shortlist,
             Dictionary<string, ComponentRecord>? externalNodes,
             bool autoLayout,
+            int maxNodeCount,
             bool sendCanvasDataEnabled,
             string? logFilePath,
             string? auditLogPath,
@@ -308,17 +332,11 @@ namespace GhCopilot.Core.Llm
                         lastErrors);
                 }
 
-                PayloadAuditLogger.LogSentPayload(
-                    attempt == 0 ? actionName : $"{actionName}_Retry{attempt}",
-                    $"{provider}:{modelId}",
-                    sendCanvasDataEnabled,
-                    systemInstruction,
-                    currentPrompt,
-                    auditLogPath);
-
+                string auditAction = attempt == 0 ? actionName : $"{actionName}_Retry{attempt}";
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    lastRawResponse = await client.GenerateGraphJsonAsync(
+                    LlmCallResult callResult = await client.GenerateGraphJsonWithUsageAsync(
                         apiKey,
                         modelId,
                         systemInstruction,
@@ -328,9 +346,34 @@ namespace GhCopilot.Core.Llm
                         cancellationToken,
                         provider,
                         customEndpointUrl).ConfigureAwait(false);
+                    lastRawResponse = callResult.Text;
+
+                    PayloadAuditLogger.LogTurnCompletion(
+                        auditAction,
+                        callResult.Usage.Provider,
+                        modelId,
+                        sendCanvasDataEnabled,
+                        systemInstruction,
+                        currentPrompt,
+                        callResult.Usage.PromptTokens,
+                        callResult.Usage.ResponseTokens,
+                        callResult.Usage.DurationMs,
+                        auditLogPath);
                 }
-                catch (GeminiApiException ex)
+                catch (LlmApiException ex)
                 {
+                    sw.Stop();
+                    PayloadAuditLogger.LogTurnCompletion(
+                        auditAction,
+                        provider,
+                        modelId,
+                        sendCanvasDataEnabled,
+                        systemInstruction,
+                        currentPrompt,
+                        0,
+                        0,
+                        sw.ElapsedMilliseconds,
+                        auditLogPath);
                     lastErrors = new List<string> { ex.Message };
                     AppendRunLog(logFilePath, modelId, logicalPromptForRepair, shortlist, lastRawResponse, false, attempt + 1, lastErrors, "ApiError");
                     return new RepairLoopResult(false, null, lastValidation, attempt + 1, lastErrors, lastRawResponse);
@@ -343,7 +386,7 @@ namespace GhCopilot.Core.Llm
                     continue;
                 }
 
-                lastValidation = GraphValidator.Validate(parsedSpec!, shortlistById, externalNodes);
+                lastValidation = GraphValidator.Validate(parsedSpec!, shortlistById, externalNodes, maxNodeCount);
                 if (lastValidation.IsValid)
                 {
                     if (autoLayout && parsedSpec!.Nodes.Count > 1 && GraphAutoLayout.NeedsAutoLayout(parsedSpec))

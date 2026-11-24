@@ -17,6 +17,7 @@ namespace GhCopilot.Rhino.Host
         public int ModifiedCount { get; set; }
         public int DeletedCount { get; set; }
         public bool ViewportUpdated { get; set; }
+        public List<Guid> CreatedIds { get; } = new List<Guid>();
         public List<string> AppliedNotes { get; } = new List<string>();
         public List<string> Warnings { get; } = new List<string>();
         public bool MadeDocumentChanges => CreatedCount > 0 || ModifiedCount > 0 || DeletedCount > 0;
@@ -139,6 +140,7 @@ namespace GhCopilot.Rhino.Host
 
                 if (turnCreatedIds.Count > 0)
                 {
+                    result.CreatedIds.AddRange(turnCreatedIds);
                     _lastCreatedIds.Clear();
                     _lastCreatedIds.AddRange(turnCreatedIds);
                 }

@@ -17,8 +17,7 @@ namespace GhCopilot.Core.Settings
 
         public static string GetDefaultKeyFilePath()
         {
-            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            return Path.Combine(localAppData, "GhCopilot", "api-key.dpapi");
+            return SharedCopilotPaths.GetApiKeyPath();
         }
 
         public static void SaveApiKey(string apiKey, string? filePath = null)

@@ -160,7 +160,7 @@ namespace GhCopilot.Tests
             });
 
             using var http = new HttpClient(handler);
-            using var client = new GeminiClient(http);
+            using var client = new LlmClient(http);
 
             string explanation = await client.GenerateTextAsync(
                 "secret-key",
@@ -241,7 +241,7 @@ namespace GhCopilot.Tests
                 }));
 
                 using var http = new HttpClient(handler);
-                using var client = new GeminiClient(http);
+                using var client = new LlmClient(http);
 
                 RepairLoopResult result = await RepairLoop.FixSelectionAndValidateAsync(
                     client,

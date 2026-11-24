@@ -67,6 +67,18 @@ namespace GhCopilot.Core.Llm
             @"\b(?:place|add|put|insert|drop|create)\s+(?:a\s+|an\s+|some\s+|two\s+|three\s+|\d+\s+)?(?:number\s+sliders?|sliders?|panels?|panel\s+inputs?|boolean\s+toggles?|toggles?|value\s+lists?|buttons?|(?:curve|brep|surface|mesh|point|geometry|selection)\s+(?:inputs?|params?|parameters?)|selection\s+inputs?)\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        private static readonly Regex ExplicitViewportVisionRegex = new Regex(
+            @"\b(?:viewport|screen\s*shot|what\s+do\s+you\s+see|look\s+(?:closely\s+)?at|visual\s+check|verify\s+(?:the\s+|live\s+)?viewport|inspect\s+(?:the\s+|live\s+)?(?:viewport|scene)|image)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex ComplexArchitectureTermsRegex = new Regex(
+            @"\b(?:pavilion|tower|facade|canopy|bridge|stair|stairs|staircase|building|campus|layout|design|columns\s+and|roof\s+and|parametric|grasshopper|script|twisted|spiral|diagrid|attractor|voronoi)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex SimpleSingleRhinoOpRegex = new Regex(
+            @"\b(?:zoom|display\s*mode|shaded|rendered|wireframe|ghosted|arctic|pen|technical|monochrome|set_view|top\s+view|front\s+view|right\s+view|left\s+view|perspective\s+view|camera|create\s+layer|layer|color|colour|paint|hide|unhide|show|select|rename|delete|box|cube|sphere|cylinder|cone|torus|circle|ellipse|rectangle|polygon|line|point|move|rotate|scale|mirror)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         private static readonly JsonSerializerOptions CompactJson = new JsonSerializerOptions
         {
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -178,7 +190,86 @@ namespace GhCopilot.Core.Llm
             return !string.IsNullOrWhiteSpace(prompt) && FollowUpAlterationRegex.IsMatch(prompt!);
         }
 
-        public static bool ShouldPlanBeforeBuilding(string? prompt, ChatSession session, bool planFirstEnabled)
+        public static bool ExplicitlyRequestsViewportVision(string? prompt)
+        {
+            return !string.IsNullOrWhiteSpace(prompt) && ExplicitViewportVisionRegex.IsMatch(prompt!);
+        }
+
+        public static bool IsSimpleSingleRhinoOpPrompt(string? prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                return false;
+            }
+
+            string trimmed = prompt!.Trim();
+            int words = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+            if (words > 24)
+            {
+                return false;
+            }
+
+            if (ComplexArchitectureTermsRegex.IsMatch(trimmed))
+            {
+                return false;
+            }
+
+            return SimpleSingleRhinoOpRegex.IsMatch(trimmed);
+        }
+
+        public static bool HasKnownCompanyClusterMatch(IReadOnlyList<ComponentRecord>? candidates, string? prompt)
+        {
+            if (candidates is null || candidates.Count == 0 || string.IsNullOrWhiteSpace(prompt))
+            {
+                return false;
+            }
+
+            string trimmedPrompt = prompt!.Trim();
+            List<string> promptTokens = Retriever.Tokenize(trimmedPrompt);
+            var promptSet = new HashSet<string>(promptTokens, StringComparer.Ordinal);
+
+            foreach (ComponentRecord record in candidates)
+            {
+                if (record == null || !record.IsCompany)
+                {
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(record.Name) &&
+                    record.Name.Trim().Length >= 3 &&
+                    trimmedPrompt.IndexOf(record.Name.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                if (!string.IsNullOrWhiteSpace(record.NickName) &&
+                    record.NickName.Trim().Length >= 3 &&
+                    trimmedPrompt.IndexOf(record.NickName.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                if (promptSet.Count >= 2)
+                {
+                    List<string> nameTokens = Retriever.Tokenize(record.Name + " " + record.SubCategory);
+                    int overlap = nameTokens.Count(t => promptSet.Contains(t));
+                    if (overlap >= 2)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        public static bool ShouldPlanBeforeBuilding(
+            string? prompt,
+            ChatSession session,
+            bool planFirstEnabled,
+            bool forcePlanFirstAlways = false,
+            bool matchesKnownCompanyCluster = false,
+            bool isSingleDirectRhinoOp = false)
         {
             if (!planFirstEnabled || string.IsNullOrWhiteSpace(prompt))
             {
@@ -197,6 +288,11 @@ namespace GhCopilot.Core.Llm
                 return false;
             }
 
+            if (forcePlanFirstAlways)
+            {
+                return true;
+            }
+
             if (session.HasBuiltInCurrentSession &&
                 string.IsNullOrWhiteSpace(session.PendingPlanSummary) &&
                 IsFollowUpAlterationPrompt(prompt))
@@ -206,6 +302,11 @@ namespace GhCopilot.Core.Llm
 
             int words = prompt!.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
             if (words <= 20 && DirectInputWidgetPlacementRegex.IsMatch(prompt))
+            {
+                return false;
+            }
+
+            if (matchesKnownCompanyCluster || isSingleDirectRhinoOp)
             {
                 return false;
             }
